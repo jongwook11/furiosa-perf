@@ -10,10 +10,7 @@ from furiosa_perf.clients.vllm_bench import VllmPerformanceBenchmark
 from furiosa_perf.log import logger
 from furiosa_perf.runner.monitor import HardwareMonitor, MonitorConfig
 from furiosa_perf.runner.server import APIServerManager
-from furiosa_perf.spec import (
-    APIServerConfig,
-    PerformanceBenchConfig,
-)
+from furiosa_perf.spec import PerformanceBenchConfig, Server
 
 
 class BenchmarkRunner:
@@ -23,27 +20,19 @@ class BenchmarkRunner:
     instances and coordinates their startup, monitoring, and cleanup.
     """
 
-    def __init__(
-        self,
-        system_info: Any,
-        hardware_type: str,
-        api_server_config: APIServerConfig,
-        benchmark_config: PerformanceBenchConfig,
-    ) -> None:
+    def __init__(self, system_info: Any, server: Server, benchmark_config: PerformanceBenchConfig) -> None:
         """Store configuration for later use in :meth:`execute`.
 
         Args:
             system_info: :class:`SystemDetector.SystemEnv` namedtuple with OS/HW info.
-            hardware_type: Accelerator type (``"npu"`` or ``"gpu"``).
-            api_server_config: Parsed API server config dataclass.
+            server: What API server to launch.
             benchmark_config: Parsed benchmark config dataclass with scenarios.
         """
         self.system_info = system_info
-        self.hardware_type = hardware_type
-        self.api_server_config = api_server_config
+        self.server = server
         self.benchmark_config = benchmark_config
 
-    def execute(self, model: str) -> list[Any]:
+    def execute(self, reuse_server: bool = False) -> list[Any]:
         """Run the full benchmark pipeline and return per-scenario results.
 
         Sequence:
@@ -54,7 +43,7 @@ class BenchmarkRunner:
             5. On completion or error, stop all components in reverse order.
 
         Args:
-            model: HuggingFace model ID or local path to pass to the server.
+            reuse_server: Use a server already running on the configured port.
 
         Returns:
             List of per-scenario result dicts from :attr:`VllmPerformanceBenchmark.total_results`.
@@ -62,14 +51,14 @@ class BenchmarkRunner:
         Raises:
             Exception: Re-raises any exception from server startup or benchmark execution.
         """
-        api_server = APIServerManager(model=model, config=self.api_server_config)
+        api_server = APIServerManager(self.server)
         benchmark: VllmPerformanceBenchmark | None = None
         monitor: HardwareMonitor | None = None
         desc = ""
 
         try:
-            logger.info(f"Starting server for {model}")
-            server_command = api_server.start()
+            logger.info(f"Starting server for {self.server.model}")
+            server_command = api_server.start(reuse_running=reuse_server)
             desc = (
                 f"* Ubuntu Version: {self.system_info.os}\n"
                 f"* Python Version: {self.system_info.python}\n"
@@ -83,19 +72,19 @@ class BenchmarkRunner:
             benchmark = VllmPerformanceBenchmark(
                 config=self.benchmark_config,
                 backend=self.system_info.runtime,
-                host=api_server.config.host,
-                port=api_server.config.port,
+                host=self.server.host,
+                port=self.server.port,
                 env=os.environ.copy(),
             )
             benchmark.setup()
 
             monitor = HardwareMonitor(
                 MonitorConfig(
-                    host=api_server.config.host,
-                    port=api_server.config.port,
+                    host=self.server.host,
+                    port=self.server.port,
                     server_pid=api_server.server_pid,
                     device_name=benchmark.device_name,
-                    device_indices=[int(d) for d in (self.api_server_config.devices or "").split(",") if d.strip()],
+                    device_indices=self.server.devices,
                     log_dir=benchmark.get_vllm_result_dir(""),
                 )
             )
@@ -126,7 +115,7 @@ class BenchmarkRunner:
         Raises:
             requests.HTTPError: If the server responds with a non-2xx status.
         """
-        resp = requests.get(f"http://{api_server.config.host}:{api_server.config.port}/v1/models", timeout=5)
+        resp = requests.get(f"{api_server.base_url}/v1/models", timeout=5)
         resp.raise_for_status()
         return resp.json()["data"][0]["id"]  # type: ignore[no-any-return]
 
@@ -137,8 +126,9 @@ class BenchmarkRunner:
             pretrained_id: Model ID returned by the running API server.
         """
         self.benchmark_config.model = pretrained_id
-        self.benchmark_config.device_name = self.system_info.hardware[self.hardware_type]["name"]
-        self.benchmark_config.used_device_num = len((self.api_server_config.devices or "").split(","))
+        self.benchmark_config.device_name = self.system_info.hardware[self.server.hardware_type]["name"]
+        self.benchmark_config.used_device_num = len(self.server.devices)
+        self.benchmark_config.parallel_label = self.server.parallel.label
 
     def _cleanup(
         self,

@@ -8,128 +8,223 @@ import yaml
 
 from furiosa_perf.log import logger
 
+# Serving backend -> accelerator family it runs on.
+BACKENDS: dict[str, str] = {"furiosa-llm": "npu", "vllm": "gpu"}
 
-@dataclass
-class APIServerConfig:
-    """Base configuration for any LLM API server."""
+# Server config keys furiosa-perf reads itself; every other key is passed through.
+SERVER_FIELDS = ("backend", "model", "devices", "parallel", "env", "host", "port")
 
-    host: str = "0.0.0.0"
-    port: int = 8000
-    tensor_parallel_size: int | None = None
-    enable_expert_parallel: bool | None = None
-    data_parallel_size: int = 1
-    devices: str | None = None  # comma-separated device indices
-    served_model_name: str | None = None
-    no_enable_prefix_caching: bool | None = True
+# Backend options furiosa-perf sets from ``devices`` and ``parallel``. They are not
+# accepted as pass-through keys: their units differ between backends (furiosa-llm
+# counts tensor parallelism in PEs), and two sources for one setting can disagree.
+PARALLEL_SERVER_ARGS = ("tensor-parallel-size", "pipeline-parallel-size", "data-parallel-size")
+
+# Applied unless the config sets either option: the fixed-length baseline compares
+# raw inference performance, which prefix-cache hits on the random prompts would skew.
+DEFAULT_SERVER_ARGS: dict[str, Any] = {"no-enable-prefix-caching": True}
+PREFIX_CACHING_ARGS = ("enable-prefix-caching", "no-enable-prefix-caching")
 
 
-@dataclass
-class VllmServerConfig(APIServerConfig):
-    """vLLM-specific API server configuration.
+@dataclass(frozen=True)
+class Parallel:
+    """Parallelism of the server, in units of devices (cards).
 
-    Infers ``tensor_parallel_size`` from ``devices`` when omitted, and vice
-    versa. Raises ``ValueError`` if both are provided but inconsistent.
+    ``tp * pp * dp`` equals the number of devices.
+
+    Attributes:
+        tp: Devices one model replica's tensors are split across.
+        pp: Pipeline stages of one replica.
+        dp: Independent replicas.
     """
 
-    def __post_init__(self) -> None:
-        """Resolve and validate tensor_parallel_size / devices consistency."""
-        if self.devices is not None:
-            self.devices = str(self.devices)
-        if self.tensor_parallel_size is None:
-            if self.devices is not None:
-                self.tensor_parallel_size = len(self.devices.split(","))
-            else:
-                self.tensor_parallel_size = 1
-                self.devices = ",".join(map(str, range(self.tensor_parallel_size)))
-        elif self.devices is None:
-            self.devices = ",".join(map(str, range(self.tensor_parallel_size)))
+    tp: int
+    pp: int = 1
+    dp: int = 1
 
-        if not self._check_compatibility():
+    @property
+    def label(self) -> str:
+        """``""`` for pure tensor parallelism, else e.g. ``"tp2-dp2"`` for result names."""
+        if self.pp == 1 and self.dp == 1:
+            return ""
+        parts = [f"tp{self.tp}"] + [f"{name}{size}" for name, size in (("pp", self.pp), ("dp", self.dp)) if size > 1]
+        return "-".join(parts)
+
+
+def parse_parallel(raw: Any, num_devices: int) -> Parallel:
+    """Resolve ``parallel`` against the device count.
+
+    Any one of ``tp``, ``pp`` and ``dp`` may be omitted and is then derived; ``pp``
+    and ``dp`` default to 1, so an absent ``parallel`` is tensor parallelism over
+    every device.
+
+    Args:
+        raw: Value of ``parallel`` in the server config (a mapping or ``None``).
+        num_devices: Number of entries in ``devices``.
+
+    Returns:
+        The resolved parallelism.
+
+    Raises:
+        ValueError: If a key is unknown, a size is not a positive integer, or the
+            sizes do not multiply to ``num_devices``.
+    """
+    raw = raw or {}
+    if not isinstance(raw, dict) or set(raw) - {"tp", "pp", "dp"}:
+        raise ValueError(f"the parallel setting '{raw}' is invalid; use a mapping with keys tp, pp and dp")
+    sizes = {}
+    for key, value in raw.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"the parallel size {key}={value!r} is invalid; use a positive integer")
+        sizes[key] = value
+
+    pp, dp = sizes.get("pp", 1), sizes.get("dp", 1)
+    tp = sizes.get("tp")
+    if tp is None:
+        tp = num_devices // (pp * dp) if num_devices % (pp * dp) == 0 else 0
+    elif "dp" not in sizes and num_devices % (tp * pp) == 0:
+        dp = num_devices // (tp * pp)
+    if tp < 1 or tp * pp * dp != num_devices:
+        raise ValueError(
+            f"the parallel setting {raw} does not fit {num_devices} devices; tp * pp * dp should equal the device count"
+        )
+    return Parallel(tp=tp, pp=pp, dp=dp)
+
+
+@dataclass(frozen=True)
+class Server:
+    """How to launch the LLM API server.
+
+    Attributes:
+        backend: ``furiosa-llm`` or ``vllm``.
+        model: Hugging Face model ID or local path to serve.
+        devices: Accelerator indices to serve on.
+        parallel: How the devices are split into tensor/pipeline/data parallelism.
+        env: Root of the Python environment whose ``bin/<backend>`` is launched. Its
+            interpreter is also where the backend version is read from, so the
+            recorded version is the one that actually served.
+        host: Address the server binds and the client connects to.
+        port: Server port.
+        args: Remaining options, passed to ``<backend> serve`` as ``--<key> <value>``.
+    """
+
+    backend: str
+    model: str
+    devices: list[int]
+    parallel: Parallel
+    env: Path
+    host: str = "0.0.0.0"
+    port: int = 8000
+    args: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def hardware_type(self) -> str:
+        """Accelerator family of the backend: ``npu`` or ``gpu``."""
+        return BACKENDS[self.backend]
+
+    @property
+    def executable(self) -> Path:
+        """The backend's command-line entry point inside :attr:`env`."""
+        return self.env / "bin" / self.backend
+
+    @property
+    def python(self) -> Path:
+        """The interpreter of :attr:`env`."""
+        return self.env / "bin" / "python"
+
+
+def parse_devices(raw: Any) -> list[int]:
+    """Read ``devices`` given as ``0``, ``"0,1"`` or ``[0, 1]``.
+
+    Args:
+        raw: Value of ``devices`` in the server config.
+
+    Returns:
+        The device indices in the given order.
+
+    Raises:
+        ValueError: If the value is empty, not a list of non-negative integers, or has duplicates.
+    """
+    items = raw if isinstance(raw, list) else str(raw).split(",")
+    try:
+        devices = [int(str(item).strip()) for item in items]
+    except ValueError:
+        devices = []
+    if not devices or min(devices) < 0 or len(set(devices)) != len(devices):
+        raise ValueError(f"the device list '{raw}' is invalid; use distinct indices such as 0,1,2,3")
+    return devices
+
+
+def parse_server(raw: dict[str, Any], default_env: Path) -> Server:
+    """Build a :class:`Server` from the parsed server config.
+
+    Keys may be written in snake_case or kebab-case; pass-through keys are
+    normalised to kebab-case, the form both backends' command lines use.
+
+    Args:
+        raw: Mapping loaded from the server config YAML.
+        default_env: Environment to use when ``env`` is not set.
+
+    Returns:
+        The validated server description.
+
+    Raises:
+        ValueError: If a required key is missing, the backend is unsupported, the
+            parallelism does not fit the devices, or a pass-through key sets
+            parallelism directly.
+    """
+    config = {key.replace("_", "-"): value for key, value in raw.items()}
+    for key in ("backend", "model", "devices"):
+        if config.get(key) in (None, ""):
+            raise ValueError(f"the server config is missing '{key}'")
+    backend = str(config["backend"])
+    if backend not in BACKENDS:
+        raise ValueError(f"the backend '{backend}' is unsupported; use one of {', '.join(BACKENDS)}")
+
+    args = {key: value for key, value in config.items() if key not in SERVER_FIELDS}
+    for key in args:
+        if key in PARALLEL_SERVER_ARGS:
             raise ValueError(
-                f"devices={self.devices!r} is not compatible with "
-                f"tensor_parallel_size={self.tensor_parallel_size}"
+                f"the server option '{key}' is not allowed; set 'parallel: {{tp, pp, dp}}' in units of devices instead"
             )
+    if not any(key in args for key in PREFIX_CACHING_ARGS):
+        args = {**DEFAULT_SERVER_ARGS, **args}
 
-    def _check_compatibility(self) -> bool:
-        """Return True when device count matches tensor_parallel_size."""
-        used = len(self.devices.split(",")) if self.devices is not None else 1
-        return used == self.tensor_parallel_size
-
-
-@dataclass
-class FuriosaLLMServerConfig(APIServerConfig):
-    """furiosa-llm-specific API server configuration."""
-
-    fxb: str | None = None
-
-    def __post_init__(self) -> None:
-        """Infer tensor_parallel_size from devices when omitted."""
-        if self.devices is not None:
-            self.devices = str(self.devices)
-        if self.tensor_parallel_size is None and self.devices is not None:
-            self.tensor_parallel_size = len(self.devices.split(","))
-
-        if not self._check_compatibility():
-            raise ValueError(
-                f"devices={self.devices!r} is not compatible with "
-                f"tensor_parallel_size={self.tensor_parallel_size}"
-            )
-
-    def _check_compatibility(self) -> bool:
-        """Return True when device count matches tensor_parallel_size."""
-        used = len(self.devices.split(",")) if self.devices is not None else 1
-        return used == self.tensor_parallel_size
+    devices = parse_devices(config["devices"])
+    return Server(
+        backend=backend,
+        model=str(config["model"]),
+        devices=devices,
+        parallel=parse_parallel(config.get("parallel"), len(devices)),
+        env=Path(config.get("env") or default_env).expanduser(),
+        host=str(config.get("host", "0.0.0.0")),
+        port=int(config.get("port", 8000)),
+        args=args,
+    )
 
 
-class APIServerConfigLoader:
-    """Load and construct an :class:`APIServerConfig` from a YAML file."""
+def load_server(path: Path, default_env: Path) -> Server:
+    """Load and validate a server config YAML.
 
-    CONFIG_REGISTRY: dict[str, type[APIServerConfig]] = {
-        "vllm": VllmServerConfig,
-        "furiosa-llm": FuriosaLLMServerConfig,
-    }
+    Args:
+        path: Server config file.
+        default_env: Environment to use when the config does not set ``env``.
 
-    @classmethod
-    def _create_config(cls, backend: str, configs: dict[str, Any]) -> APIServerConfig:
-        """Instantiate the correct config subclass for *backend*.
+    Returns:
+        The validated server description.
 
-        Args:
-            backend: Backend name (e.g. ``"vllm"`` or ``"furiosa-llm"``).
-            configs: Raw YAML key/value pairs forwarded to the dataclass.
-
-        Returns:
-            A fully initialised :class:`APIServerConfig` subclass instance.
-
-        Raises:
-            ValueError: If *backend* is not registered in :attr:`CONFIG_REGISTRY`.
-        """
-        config_class = cls.CONFIG_REGISTRY.get(backend)
-        if config_class is None:
-            raise ValueError(f"No server config registered for backend {backend!r}.")
-        return config_class(**configs)
-
-    @classmethod
-    def api_server_setup(cls, backend: str, api_server_config_path: Path) -> APIServerConfig:
-        """Load a server config YAML and return the parsed config object.
-
-        Args:
-            backend: Backend name used to select the config class.
-            api_server_config_path: Path to the YAML configuration file.
-
-        Returns:
-            Parsed :class:`APIServerConfig` instance.
-
-        Raises:
-            FileNotFoundError: If the config file does not exist.
-        """
-        if not api_server_config_path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {api_server_config_path}")
-
-        with api_server_config_path.open() as f:
-            api_server_config = cls._create_config(backend=backend, configs=yaml.safe_load(f))
-
-        logger.info(f"Loaded server config: {api_server_config}")
-        return api_server_config
+    Raises:
+        ValueError: If the file is not a mapping or fails :func:`parse_server`.
+    """
+    with path.open() as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        raise ValueError(f"the server config {path} should be a mapping of option names to values")
+    try:
+        server = parse_server(raw, default_env)
+    except ValueError as e:
+        raise ValueError(f"{path}: {e}") from None
+    logger.info(f"Loaded server config: {server}")
+    return server
 
 
 @dataclass
@@ -215,6 +310,7 @@ class PerformanceBenchConfig:
     model: str = ""
     device_name: str = ""
     used_device_num: int = 1
+    parallel_label: str = ""  # Parallel.label; empty for pure tensor parallelism
     scenarios: list[ScenarioConfig] = field(default_factory=list)
 
 

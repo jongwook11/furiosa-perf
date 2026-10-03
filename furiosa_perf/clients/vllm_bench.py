@@ -109,6 +109,7 @@ class VllmPerformanceBenchmark:
         self.model = config.model
         self.device_name = config.device_name
         self.used_device_num = config.used_device_num
+        self.parallel_label = config.parallel_label
         self.task = config.task
         self.scenarios = config.scenarios
         self.backend = backend
@@ -386,7 +387,7 @@ class VllmPerformanceBenchmark:
             f"{prefix}\n"
             f"* Performance Benchmark - {self.name} for {self.task}\n"
             f"* Model Info: {self.model}\n"
-            f"* Device Info: {self.device_name} x {self.used_device_num}\n"
+            f"* Device Info: {self.device_name} x {self.used_device_num} {self.parallel_label}\n"
             f"* date: {datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}\n"
             f"* Scenario Results:"
         )
@@ -473,7 +474,7 @@ class VllmPerformanceBenchmark:
         task_name = self.task
         result_dir = (
             self.base_dir
-            / f"{self.device_name}_{self.used_device_num}_{self.backend}"
+            / f"{self.device_name}_{self.used_device_num}{f'-{self.parallel_label}' if self.parallel_label else ''}_{self.backend}"
             / self.name
             / task_name
             / self.model.split("/")[-1]

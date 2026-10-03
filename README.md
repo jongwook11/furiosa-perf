@@ -89,11 +89,8 @@ huggingface-cli login
 
 ```bash
 furiosa-perf run \
-  --backend furiosa-llm \
-  --hardware-type npu \
   --server-config examples/server/exaone4.yaml \
-  --benchmark-config examples/bench/llm_scenario.yaml \
-  --model-id furiosa-ai/EXAONE-4.0-32B-FP8
+  --benchmark-config examples/bench/llm_scenario.yaml
 ```
 
 See [`examples/script.sh`](examples/script.sh) for a complete working example.
@@ -102,11 +99,10 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 
 | Option | Required | Default | Description |
 |---|---|---|---|
-| `--backend` | | `furiosa-llm` | Serving backend (`furiosa-llm` or `vllm`) |
-| `--hardware-type` | | `npu` | Accelerator type (`npu` or `gpu`) |
-| `--server-config` | ✓ | — | API server config YAML |
+| `--server-config` | ✓ | — | API server config YAML (backend, model, devices, …) |
 | `--benchmark-config` | ✓ | — | Benchmark scenario config YAML |
-| `--model-id` | | `LGAI-EXAONE/EXAONE-4.0-32B-FP8` | HuggingFace model ID or local path |
+| `--reuse-server` | | off | Benchmark a server already running on the configured port instead of launching one |
+| `--check` | | off | Validate both configs, print the server command and scenario count, and exit (no hardware needed) |
 
 ---
 
@@ -114,28 +110,43 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 
 ### Server config (`--server-config`)
 
-Controls how the API server is launched. Keys differ slightly by backend.
+Controls how the API server is launched.
 
 **Example** (`examples/server/exaone4.yaml`):
 
 ```yaml
-served_model_name: furiosa-ai/EXAONE-4.0-32B-FP8
+backend: furiosa-llm
+model: furiosa-ai/EXAONE-4.0-32B-FP8
 devices: 0,1,2,3
 ```
 
-**Common keys:**
+**Keys furiosa-perf reads:**
 
 | Key | Default | Description |
 |---|---|---|
+| `backend` | — (required) | `furiosa-llm` (RNGD) or `vllm` (NVIDIA GPU) |
+| `model` | — (required) | Hugging Face model ID or local path to serve |
+| `devices` | — (required) | Device indices to serve on, e.g. `0,1,2,3` |
+| `parallel` | `{tp: <number of devices>}` | Split of the devices into tensor (`tp`), pipeline (`pp`) and data (`dp`) parallelism, in units of devices; `tp * pp * dp` must equal the device count and one of them may be omitted |
+| `env` | the environment furiosa-perf runs in | Python environment whose `bin/<backend>` is launched; the recorded backend version is read from it |
 | `host` | `0.0.0.0` | Server bind address |
 | `port` | `8000` | Server port |
-| `devices` | — | Comma-separated RNGD indices to use for serving (e.g. `0,1,2,3`) |
-| `tensor_parallel_size` | inferred from `devices` | TP degree |
-| `served_model_name` | — | Model alias exposed on `/v1/models` |
+
+**Every other key** is passed to `<backend> serve` as `--<key> <value>` (`true` → bare flag, `false` → omitted; snake_case keys are converted to kebab-case), for example `served-model-name`, `max-model-len` or `enable-prefix-caching`. Prefix caching is disabled unless one of `enable-prefix-caching` / `no-enable-prefix-caching` is set, because the fixed-length benchmarks compare raw inference performance. The parallel sizes are set only through `parallel`: the backends count them in different units (furiosa-llm counts tensor parallelism in PEs, 8 per RNGD).
+
+```yaml
+# Two RNGDs as two independent replicas, served from a dedicated SDK environment
+backend: furiosa-llm
+model: furiosa-ai/Qwen3-8B-FP8
+devices: 0,1
+parallel: {dp: 2}
+env: /opt/venvs/furiosa-llm-2026.4.0
+max-model-len: 32768
+```
 
 **Choosing `devices` (Furiosa RNGD)**
 
-`devices` specifies which RNGD cards to use and how many to allocate for the model. The number of devices determines the tensor parallelism degree — larger models require more cards.
+`devices` specifies which RNGD cards to use and how many to allocate for the model. By default all of them form one tensor-parallel replica; use `parallel` to split them differently. Larger models require more cards per replica.
 
 First, check how many RNGDs are available in your environment:
 
@@ -172,8 +183,9 @@ Furiosa AI supported models are available at [huggingface.co/furiosa-ai](https:/
 
 **Notes:**
 
-- `furiosa-llm` backend: `devices: 0,1,2,3` → `--devices npu:0,npu:1,npu:2,npu:3` (converted automatically)
-- `vllm` backend: `devices` sets `CUDA_VISIBLE_DEVICES`
+- `furiosa-llm` backend: `devices: 0,1,2,3` → `--devices npu:0,npu:1,npu:2,npu:3`, and `parallel` → `--tensor-parallel-size <tp × 8> --pipeline-parallel-size <pp> --data-parallel-size <dp>`
+- `vllm` backend: `devices` sets `CUDA_VISIBLE_DEVICES`, and `parallel` → `--tensor-parallel-size <tp> --pipeline-parallel-size <pp> --data-parallel-size <dp>`
+- Results of non-default layouts get the layout in their directory name, e.g. `RNGD_4-tp2-dp2_furiosa-llm_<version>`
 
 ---
 

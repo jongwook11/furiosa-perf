@@ -1,108 +1,189 @@
 """Launch, health-check and stop the LLM API server process."""
 
+import json
 import os
 import signal
 import subprocess
 import time
-from dataclasses import asdict
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 import psutil
 import requests
 
 from furiosa_perf.log import logger
-from furiosa_perf.spec import (
-    APIServerConfig,
-    FuriosaLLMServerConfig,
-    VllmServerConfig,
-)
+from furiosa_perf.spec import Server
+
+# furiosa-llm counts tensor parallelism in PEs; one RNGD card has 8.
+PES_PER_RNGD = 8
+STARTUP_TIMEOUT_S = 1800
+STARTUP_POLL_S = 5
+HEALTH_TIMEOUT_S = 5
+LOG_TAIL_LINES = 20
+# Variables that would point the server at another Python environment than Server.env.
+FOREIGN_PYTHON_VARS = ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME")
+
+
+def option_args(key: str, value: Any) -> list[str]:
+    """Render one pass-through option as command-line arguments.
+
+    Args:
+        key: Option name in kebab-case, without dashes.
+        value: ``True`` for a bare flag, ``False``/``None`` to omit it, a list for
+            several values, a dict for a JSON-valued option, anything else as text.
+
+    Returns:
+        The arguments to append, possibly none.
+    """
+    if value is None or value is False:
+        return []
+    if value is True:
+        return [f"--{key}"]
+    if isinstance(value, list):
+        return [f"--{key}", *map(str, value)]
+    if isinstance(value, dict):
+        return [f"--{key}", json.dumps(value)]
+    return [f"--{key}", str(value)]
+
+
+def server_command(server: Server) -> tuple[list[str], dict[str, str]]:
+    """Build the ``<backend> serve`` command line and its environment.
+
+    The devices become ``--devices npu:<i>,...`` for furiosa-llm and
+    ``CUDA_VISIBLE_DEVICES`` for vLLM. All three parallel sizes are always passed:
+    furiosa-llm would otherwise infer data parallelism from the PEs it can see.
+
+    Args:
+        server: Server description.
+
+    Returns:
+        ``(argv, env)`` for :class:`subprocess.Popen`.
+    """
+    argv = [str(server.executable), "serve", server.model, "--host", server.host, "--port", str(server.port)]
+    env = {key: value for key, value in os.environ.items() if key not in FOREIGN_PYTHON_VARS}
+    env["PATH"] = f"{server.env / 'bin'}{os.pathsep}{env.get('PATH', '')}"
+    env["PYTHONUNBUFFERED"] = "1"
+
+    parallel = server.parallel
+    if server.backend == "furiosa-llm":
+        argv += ["--devices", ",".join(f"npu:{i}" for i in server.devices)]
+        argv += ["--tensor-parallel-size", str(parallel.tp * PES_PER_RNGD)]
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, server.devices))
+        argv += ["--tensor-parallel-size", str(parallel.tp)]
+    argv += ["--pipeline-parallel-size", str(parallel.pp), "--data-parallel-size", str(parallel.dp)]
+
+    for key, value in server.args.items():
+        argv += option_args(key, value)
+    return argv, env
+
+
+def pid_listening_on(port: int) -> int:
+    """PID of the process listening on TCP ``port``, or ``-1`` if none or not visible."""
+    try:
+        connections = psutil.net_connections(kind="tcp")
+    except psutil.Error:
+        return -1
+    for connection in connections:
+        if connection.status == psutil.CONN_LISTEN and connection.laddr.port == port and connection.pid:
+            return int(connection.pid)
+    return -1
+
+
+def _process_name(pid: int) -> str:
+    """Name of process ``pid``, or ``"unknown"`` if it cannot be read."""
+    try:
+        return str(psutil.Process(pid).name())
+    except psutil.Error:
+        return "unknown"
 
 
 class APIServerManager:
-    """Manage the lifecycle of a vLLM or furiosa-llm API server subprocess.
+    """Manage the lifecycle of a vLLM or furiosa-llm API server subprocess."""
 
-    Handles starting, health-checking, and stopping the server process, and
-    streams server logs to the logger while waiting for startup.
-    """
-
-    def __init__(
-        self,
-        config: APIServerConfig,
-        model: str = "furiosa-ai/Llama-3.1-8B-Instruct",
-    ) -> None:
+    def __init__(self, server: Server) -> None:
         """Initialise the manager without starting the server.
 
         Args:
-            config: Server configuration (host, port, devices, …).
-            model: HuggingFace model ID or local path to serve.
+            server: What to launch.
         """
-        self.model = model
-        self.config = config
+        self.server = server
         self.server_process: subprocess.Popen[str] | None = None
-        self.server_ready = False
         self.server_pid = -1
         self._log_file: TextIO | None = None
         self._log_path: Path | None = None
 
-    def __del__(self) -> None:
-        self.stop()
+    @property
+    def base_url(self) -> str:
+        """URL prefix of the server's HTTP API."""
+        return f"http://{self.server.host}:{self.server.port}"
 
-    def start(self) -> str:
+    def start(self, reuse_running: bool = False) -> str:
         """Start the API server and wait until it is ready.
 
+        Args:
+            reuse_running: Use a server already listening on the port instead of
+                failing. It must serve the configured model.
+
         Returns:
-            The full server command as a space-joined string, or ``""`` if the
-            server was already running.
+            The server command line, or ``""`` when an already running server is used.
 
         Raises:
-            ValueError: If the command cannot be built from the config.
-            RuntimeError: If the server does not become healthy within the timeout.
+            RuntimeError: If the port is taken (by a server without ``reuse_running``
+                or by another program), the backend is missing from the environment,
+                or the server exits or does not become ready in time.
         """
-        if self._is_api_server_ready(self.model):
-            logger.warning(f"API server already running for model: {self.model}")
-            self._get_opened_server_pid()
-            return ""
+        running_model = self._served_model()
+        if running_model is not None:
+            return self._reuse(running_model, reuse_running)
+        listener = pid_listening_on(self.server.port)
+        if listener > 0:
+            raise RuntimeError(
+                f"port {self.server.port} is already in use by pid {listener} ({_process_name(listener)}); "
+                "set another 'port' in the server config"
+            )
+        if not self.server.executable.exists():
+            raise RuntimeError(
+                f"cannot find {self.server.backend} at {self.server.executable}; "
+                f"set 'env' in the server config to the environment that has {self.server.backend} installed"
+            )
 
-        if self.server_process and self.server_process.poll() is None:
-            logger.warning("Server already running.")
-            self._get_opened_server_pid()
-            return ""
-
-        command, env = self._build_command()
-        if not command:
-            raise ValueError("Failed to build server command.")
-
-        logger.info(f"Starting server: {' '.join(command)}")
+        argv, env = server_command(self.server)
+        command = " ".join(argv)
+        logger.info(f"Starting server: {command}")
 
         log_dir = Path("./serve_logs")
         log_dir.mkdir(parents=True, exist_ok=True)
-        safe_model_name = self.model.replace("/", "_")
-        self._log_path = log_dir / f"serve_{safe_model_name}_{int(time.time())}.log"
+        self._log_path = log_dir / f"serve_{self.server.model.replace('/', '_')}_{int(time.time())}.log"
         logger.info(f"Server log: {self._log_path}")
-        self._log_file = open(self._log_path, "w", buffering=1)  # noqa: SIM115, PTH123
+        self._log_file = open(self._log_path, "w", buffering=1)  # noqa: SIM115, PTH123 - closed in stop()
 
-        env["PYTHONUNBUFFERED"] = "1"
         self.server_process = subprocess.Popen(
-            command,
-            env=env,
-            stdout=self._log_file,
-            stderr=self._log_file,
-            text=True,
-            start_new_session=True,
+            argv, env=env, stdout=self._log_file, stderr=self._log_file, text=True, start_new_session=True
         )
-
-        self._wait_for_startup(url=f"http://{self.config.host}:{self.config.port}/v1/models")
-        self.server_ready = True
         self.server_pid = self.server_process.pid
+        self._wait_for_startup()
         logger.info("Server is ready.")
-        return " ".join(command)
+        return command
+
+    def _reuse(self, running_model: str, reuse_running: bool) -> str:
+        """Adopt the server already listening on the port, or refuse to."""
+        port = self.server.port
+        if not reuse_running:
+            raise RuntimeError(
+                f"port {port} already serves '{running_model}'; stop that server or pass --reuse-server to use it"
+            )
+        expected = str(self.server.args.get("served-model-name") or self.server.model)
+        if running_model != expected:
+            raise RuntimeError(f"the server on port {port} serves '{running_model}', not the configured '{expected}'")
+        self.server_pid = pid_listening_on(port)
+        logger.warning(f"Using the server already running on port {port} (pid {self.server_pid})")
+        return ""
 
     def stop(self) -> None:
-        """Terminate the server process gracefully, falling back to SIGKILL."""
-        if not self.server_process:
+        """Terminate the server process group gracefully, falling back to SIGKILL."""
+        if self.server_process is None:
             return
-
         if self.server_process.poll() is None:
             logger.info("Stopping server process…")
             try:
@@ -116,95 +197,34 @@ class APIServerManager:
             logger.info(f"Server already exited with code {self.server_process.poll()}.")
 
         self.server_process = None
-        self.server_ready = False
         if self._log_file:
             self._log_file.close()
             self._log_file = None
 
-    def _to_kebab_case(self, s: str) -> str:
-        """Convert an underscore-separated string to kebab-case."""
-        return s.replace("_", "-")
-
-    def _build_command(self) -> tuple[list[str], dict[str, str]]:
-        """Construct the server CLI command and environment from the config.
-
-        Returns:
-            A tuple of ``(command_argv, env_dict)``.
-        """
-        env = os.environ.copy()
-        command: list[str] = []
-
-        if isinstance(self.config, VllmServerConfig):
-            command = ["vllm", "serve", self.model]
-            for key, value in asdict(self.config).items():
-                if value is None:
-                    continue
-                cli_key = self._to_kebab_case(key)
-                if isinstance(value, bool):
-                    if value:
-                        command.append(f"--{cli_key}")
-                elif isinstance(value, int | str | float):
-                    if isinstance(value, str) and cli_key == "devices":
-                        env["CUDA_VISIBLE_DEVICES"] = value
-                        continue
-                    command.extend([f"--{cli_key}", str(value)])
-                else:
-                    logger.warning(f"Unsupported config type for {key}: {type(value)}")
-
-        elif isinstance(self.config, FuriosaLLMServerConfig):
-            command = ["furiosa-llm", "serve", self.model]
-            for key, value in asdict(self.config).items():
-                if value is None:
-                    continue
-                cli_key = self._to_kebab_case(key)
-                if isinstance(value, bool):
-                    if value:
-                        command.append(f"--{cli_key}")
-                elif isinstance(value, int | str | float):
-                    if isinstance(value, str) and cli_key == "devices":
-                        # Convert "0,1,2,3" → "npu:0,npu:1,npu:2,npu:3"
-                        value = ",".join(f"npu:{idx}" for idx in value.split(","))
-                    if cli_key == "tensor-parallel-size":
-                        # furiosa-llm counts PEs (8 per NPU); vLLM counts NPUs.
-                        value = value * 8
-                    command.extend([f"--{cli_key}", str(value)])
-                else:
-                    logger.warning(f"Unsupported config type for {key}: {type(value)}")
-        else:
-            logger.error(f"Unsupported API server config type: {type(self.config)}")
-
-        return command, env
-
-    def _is_api_server_ready(self, expected_model_id: str) -> bool:
-        """Return True when the server is already serving *expected_model_id*.
-
-        Args:
-            expected_model_id: Model ID to match against ``/v1/models`` response.
-        """
-        url = f"http://{self.config.host}:{self.config.port}/v1/models"
+    def _served_model(self) -> str | None:
+        """ID of the model served on the configured port, or ``None`` if nothing answers."""
         try:
-            resp = requests.get(url, timeout=5)
-            resp.raise_for_status()
-            model_id = resp.json()["data"][0]["id"]
-            return model_id == expected_model_id  # type: ignore[no-any-return]
+            response = requests.get(f"{self.base_url}/v1/models", timeout=HEALTH_TIMEOUT_S)
+            response.raise_for_status()
+            return str(response.json()["data"][0]["id"])
         except (requests.RequestException, KeyError, IndexError, ValueError):
-            return False
+            return None
 
-    def _wait_for_startup(
-        self, url: str = "http://localhost:8000/v1/models", timeout: int = 1800
-    ) -> None:
-        """Poll *url* until the server responds 200, streaming its log to the logger.
+    def _log_tail(self) -> str:
+        """Last lines of the server log, for error messages."""
+        if self._log_path is None or not self._log_path.exists():
+            return ""
+        lines = self._log_path.read_text(errors="replace").splitlines()[-LOG_TAIL_LINES:]
+        return "\n".join(lines)
 
-        Args:
-            url: Health-check URL to poll.
-            timeout: Maximum seconds to wait before raising.
+    def _wait_for_startup(self) -> None:
+        """Poll ``/v1/models`` until it answers, streaming the server log meanwhile.
 
         Raises:
-            RuntimeError: If the server process exits early or the timeout elapses.
+            RuntimeError: If the server process exits or the timeout elapses.
         """
         start = time.time()
         log_pos = 0
-
         while True:
             if self._log_path and self._log_path.exists():
                 with self._log_path.open() as f:
@@ -213,37 +233,15 @@ class APIServerManager:
                         logger.info(f"[server] {line.rstrip()}")
                     log_pos = f.tell()
 
-            if self.server_process and self.server_process.poll() is not None:
+            if self.server_process is not None and self.server_process.poll() is not None:
                 raise RuntimeError(
-                    f"Server exited unexpectedly (code {self.server_process.poll()}). "
-                    f"See {self._log_path}"
+                    f"the server exited during startup with code {self.server_process.poll()}; "
+                    f"see {self._log_path}. Last lines:\n{self._log_tail()}"
                 )
-
-            try:
-                resp = requests.get(url, timeout=5)
-                if resp.status_code == 200:
-                    logger.info("Server startup complete.")
-                    return
-            except requests.RequestException as e:
-                logger.debug(f"Server not ready yet: {e}")
-
-            if time.time() - start > timeout:
+            if self._served_model() is not None:
+                return
+            if time.time() - start > STARTUP_TIMEOUT_S:
                 raise RuntimeError(
-                    f"Server did not start within {timeout}s. See {self._log_path}"
+                    f"the server did not become ready within {STARTUP_TIMEOUT_S} s; see {self._log_path}"
                 )
-
-            logger.info("Waiting for server launch — checking again in 30 s…")
-            time.sleep(30)
-
-    def _get_opened_server_pid(self) -> None:
-        """Populate :attr:`server_pid` by scanning running processes by name."""
-        if isinstance(self.config, VllmServerConfig):
-            process_name = "vllm"
-        elif isinstance(self.config, FuriosaLLMServerConfig):
-            process_name = "furiosa-llm"
-        else:
-            return
-
-        for proc in psutil.process_iter(["pid", "name"]):
-            if proc.info["name"] == process_name:
-                self.server_pid = proc.info["pid"]
+            time.sleep(STARTUP_POLL_S)

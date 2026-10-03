@@ -4,7 +4,6 @@
 import csv
 import os
 import subprocess
-import sys
 from collections import namedtuple
 from typing import Any, Callable
 
@@ -24,19 +23,20 @@ class SystemDetector:
 
     @staticmethod
     def check_system_compatibility(
-        hardware_type: str, backend: str
+        hardware_type: str, backend: str, python: str
     ) -> tuple[bool, "SystemDetector.SystemEnv"]:
         """Check whether the required hardware and backend are available.
 
         Args:
             hardware_type: Target accelerator type (e.g. ``"npu"`` or ``"gpu"``).
             backend: Serving framework name (e.g. ``"furiosa-llm"`` or ``"vllm"``).
+            python: Interpreter of the environment the server runs from.
 
         Returns:
             A tuple of ``(is_compatible, system_info)``. ``is_compatible`` is
             ``False`` when the hardware or framework is not found.
         """
-        system_info = SystemDetector.detect_system_info(hardware_type, backend)
+        system_info = SystemDetector.detect_system_info(hardware_type, backend, python)
         hw = system_info.hardware.get(hardware_type)
         if hw is None or hw.get("name") == "Unknown":
             logger.warning(f"No {hardware_type.upper()} detected.")
@@ -49,21 +49,23 @@ class SystemDetector:
         return True, system_info
 
     @staticmethod
-    def detect_system_info(hardware_type: str, backend: str) -> "SystemDetector.SystemEnv":
+    def detect_system_info(hardware_type: str, backend: str, python: str) -> "SystemDetector.SystemEnv":
         """Collect OS, Python, framework, and hardware metadata.
 
         Args:
             hardware_type: Accelerator type to probe (``"npu"`` or ``"gpu"``).
             backend: Framework name used to look up the installed package version.
+            python: Interpreter of the server's environment; the Python and backend
+                versions are read there, not from furiosa-perf's own interpreter.
 
         Returns:
             A :class:`SystemEnv` namedtuple with all detected fields.
         """
-        pv = sys.version_info
+        python_version, backend_version = SystemDetector._get_server_versions(python, backend)
         return SystemDetector.SystemEnv(
             os=SystemDetector._get_os(),
-            python=f"{pv.major}.{pv.minor}.{pv.micro}",
-            runtime=SystemDetector._get_framework(backend),
+            python=python_version,
+            runtime=f"{backend}_{backend_version}",
             hardware=SystemDetector._get_hardware(hardware_type),
         )
 
@@ -196,15 +198,24 @@ class SystemDetector:
         return gpus
 
     @staticmethod
-    def _get_framework(backend: str) -> str:
-        """Return ``"<backend>_<version>"`` or ``"<backend>_Unknown"`` if not installed.
+    def _get_server_versions(python: str, backend: str) -> tuple[str, str]:
+        """Return ``(python_version, backend_version)`` of the server's interpreter.
+
+        Either is ``"Unknown"`` when the interpreter or the package is missing.
 
         Args:
-            backend: Package name to look up (e.g. ``"vllm"`` or ``"furiosa-llm"``).
+            python: Interpreter of the server's environment.
+            backend: Distribution name, e.g. ``"vllm"`` or ``"furiosa-llm"``.
         """
-        from importlib.metadata import PackageNotFoundError, version
-
+        code = (
+            "import importlib.metadata as m, platform, sys\n"
+            "print(platform.python_version())\n"
+            "try:\n    print(m.version(sys.argv[1]))\n"
+            "except m.PackageNotFoundError:\n    print('Unknown')\n"
+        )
         try:
-            return f"{backend}_{version(backend)}"
-        except PackageNotFoundError:
-            return f"{backend}_Unknown"
+            out = subprocess.run([python, "-c", code, backend], capture_output=True, text=True, check=True).stdout
+            python_version, backend_version = out.split()
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            return "Unknown", "Unknown"
+        return python_version, backend_version
