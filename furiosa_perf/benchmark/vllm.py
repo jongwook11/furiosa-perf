@@ -5,7 +5,7 @@ import signal
 import subprocess
 from collections import defaultdict
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -269,7 +269,7 @@ class VllmPerformanceBenchmark:
         command = self._get_command_for_scenario(scenario)
         logger.info(f"Executing: {' '.join(command)} | cwd: {cwd}")
 
-        start_timestamp = datetime.now(UTC).isoformat()
+        start_timestamp = datetime.now(timezone.utc).isoformat()
         env = os.environ.copy()
         if hf_token := self.env.get("HF_TOKEN"):
              env["HF_TOKEN"] = hf_token
@@ -296,7 +296,7 @@ class VllmPerformanceBenchmark:
                 f"Benchmark failed — subprocess exited with code {self.bench_process.returncode}"
             )
         self.bench_process = None
-        end_timestamp = datetime.now(UTC).isoformat()
+        end_timestamp = datetime.now(timezone.utc).isoformat()
 
         result = self._parse_results("".join(output_lines), scenario)
         result.update(
@@ -383,7 +383,7 @@ class VllmPerformanceBenchmark:
             f"* Performance Benchmark - {self.name} for {self.task}\n"
             f"* Model Info: {self.model}\n"
             f"* Device Info: {self.device_name} x {self.used_device_num}\n"
-            f"* date: {datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}\n"
+            f"* date: {datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}\n"
             f"* Scenario Results:"
         )
 

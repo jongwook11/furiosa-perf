@@ -11,7 +11,7 @@ import contextlib
 import subprocess
 import time
 from dataclasses import astuple, dataclass, fields
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from multiprocessing import Process
 from multiprocessing.synchronize import Event as EventType
 from pathlib import Path
@@ -167,7 +167,7 @@ class HardwareMonitor:
                 while not stop_event.is_set():
                     start_time = time.perf_counter()
                     data = HardwareMonitorData()
-                    data.timestamp = datetime.now(UTC).isoformat()
+                    data.timestamp = datetime.now(timezone.utc).isoformat()
 
                     for device in devices:
                         power_consumption = device.power_consumption()
@@ -234,7 +234,7 @@ class HardwareMonitor:
                 while not stop_event.is_set():
                     start_time = time.perf_counter()
                     data = HardwareMonitorData()
-                    data.timestamp = datetime.now(UTC).isoformat()
+                    data.timestamp = datetime.now(timezone.utc).isoformat()
 
                     try:
                         nvidia_smi = subprocess.Popen(

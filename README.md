@@ -27,15 +27,14 @@ See [Benchmark Methodology](examples/BENCHMARK.md) for a detailed explanation of
 ## Requirements
 
 - **OS**: Linux
-- **Python**: 3.12+
-- **APT**: `python3.12-venv` (used internally to create a venv for the vLLM benchmark tool)
+- **Python**: 3.10+ (the default `python3` on Ubuntu 22.04 works)
+- **APT**: `python3-venv`
+- **[uv](https://docs.astral.sh/uv/)**: used internally to create a separate venv for the vLLM benchmark tool
 
 ```bash
 # ubuntu 22.04
-sudo apt install software-properties-common -y
-sudo add-apt-repository ppa:deadsnakes/ppa -y
-sudo apt update
-sudo apt install python3.12 python3.12-venv -y
+sudo apt install python3-venv -y
+pip install uv
 ```
 
 ### Backend prerequisites
@@ -61,7 +60,7 @@ pip install vllm
 git clone https://github.com/furiosa-ai/furiosa-perf.git
 cd furiosa-perf
 
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 
 pip install -e .

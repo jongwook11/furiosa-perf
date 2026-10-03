@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 import yaml
 
@@ -201,7 +201,7 @@ class EmbeddingScenarioConfig(BaseScenarioConfig):
                 self.num_prompts = self.max_concurrency * 3
 
 
-type ScenarioConfig = (
+ScenarioConfig: TypeAlias = (
     LLMScenarioConfig | VLScenarioConfig | RerankerScenarioConfig | EmbeddingScenarioConfig
 )
 
