@@ -1,12 +1,10 @@
 """Server lifecycle management and benchmark orchestration."""
 
-import multiprocessing
 import os
 import signal
 import subprocess
 import time
 from dataclasses import asdict
-from multiprocessing.synchronize import Event as EventType
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -14,7 +12,7 @@ import psutil
 import requests
 
 from furiosa_perf.benchmark.vllm import VllmPerformanceBenchmark
-from furiosa_perf.runner.monitor import HardwareMonitor
+from furiosa_perf.runner.monitor import HardwareMonitor, MonitorConfig
 from furiosa_perf.utils.config import (
     APIServerConfig,
     FuriosaLLMServerConfig,
@@ -302,8 +300,7 @@ class BenchmarkRunner:
         """
         api_server = APIServerManager(model=model, config=self.api_server_config)
         benchmark: VllmPerformanceBenchmark | None = None
-        monitoring_proc: multiprocessing.Process | None = None
-        stop_monitor_event: EventType | None = None
+        monitor: HardwareMonitor | None = None
         desc = ""
 
         try:
@@ -328,17 +325,18 @@ class BenchmarkRunner:
             )
             benchmark.setup()
 
-            stop_monitor_event = multiprocessing.Event()
-            monitoring_proc = HardwareMonitor.start_monitor(
-                api_server.config.host,
-                api_server.config.port,
-                api_server.server_pid,
-                benchmark.device_name,
-                benchmark.used_device_num,
-                benchmark.base_dir,
-                stop_monitor_event,
+            monitor = HardwareMonitor(
+                MonitorConfig(
+                    host=api_server.config.host,
+                    port=api_server.config.port,
+                    server_pid=api_server.server_pid,
+                    device_name=benchmark.device_name,
+                    device_indices=[int(d) for d in (self.api_server_config.devices or "").split(",") if d.strip()],
+                    log_dir=benchmark.get_vllm_result_dir(""),
+                )
             )
-            benchmark.run()
+            monitor.start()
+            benchmark.run(monitor)
 
         except Exception:
             logger.exception("Benchmark execution failed.")
@@ -346,7 +344,7 @@ class BenchmarkRunner:
         finally:
             old_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
             try:
-                self._cleanup(benchmark, monitoring_proc, stop_monitor_event, api_server, desc)
+                self._cleanup(benchmark, monitor, api_server, desc)
             finally:
                 signal.signal(signal.SIGINT, old_sigint)
 
@@ -378,31 +376,10 @@ class BenchmarkRunner:
         self.benchmark_config.device_name = self.system_info.hardware[self.hardware_type]["name"]
         self.benchmark_config.used_device_num = len((self.api_server_config.devices or "").split(","))
 
-    def _stop_monitor(
-        self, proc: multiprocessing.Process, event: EventType
-    ) -> None:
-        """Stop the monitoring process with graceful → terminate → kill escalation.
-
-        Args:
-            proc: The monitoring :class:`multiprocessing.Process` to stop.
-            event: The stop event to signal first.
-        """
-        event.set()
-        proc.join(timeout=5)
-        if proc.is_alive():
-            logger.warning("Monitoring process did not stop gracefully; terminating.")
-            proc.terminate()
-            proc.join(timeout=2)
-        if proc.is_alive():
-            logger.warning("Monitoring process still alive; killing.")
-            proc.kill()
-            proc.join(timeout=2)
-
     def _cleanup(
         self,
         benchmark: VllmPerformanceBenchmark | None,
-        monitoring_proc: multiprocessing.Process | None,
-        stop_monitor_event: EventType | None,
+        monitor: HardwareMonitor | None,
         api_server: APIServerManager | None,
         desc: str,
     ) -> None:
@@ -410,8 +387,7 @@ class BenchmarkRunner:
 
         Args:
             benchmark: Benchmark instance to stop and finalise (may be ``None``).
-            monitoring_proc: Monitoring subprocess to stop (may be ``None``).
-            stop_monitor_event: Event used to signal the monitoring loop.
+            monitor: Hardware monitor to stop (may be ``None``).
             api_server: API server to stop (may be ``None``).
             desc: Passed through to :meth:`VllmPerformanceBenchmark.finish_info`.
         """
@@ -421,9 +397,9 @@ class BenchmarkRunner:
             except Exception:
                 logger.exception("Failed to stop benchmark.")
 
-        if monitoring_proc is not None and stop_monitor_event is not None:
+        if monitor is not None:
             try:
-                self._stop_monitor(monitoring_proc, stop_monitor_event)
+                monitor.stop()
             except Exception:
                 logger.exception("Failed to stop monitoring process.")
 

@@ -104,7 +104,7 @@ This tests **prefill and decode hybrid batching** under sustained load at the ta
 | **Output Throughput** | tok/s | Output tokens generated per second across all concurrent requests. |
 | **Total Throughput** | tok/s | Combined input + output tokens processed per second. |
 
-In addition, per-scenario hardware metrics (NPU/GPU power, temperature, utilization; host CPU and memory) are sampled throughout each run and written to a monitoring CSV alongside the benchmark results.
+In addition, the configured devices (power, temperatures, utilization, clocks, throttling), the server's `/metrics` (queue, KV-cache usage, token and prefix-cache counters) and server/client/host CPU and memory are sampled once per second for the whole run; each scenario's window is cut out of that log, and the full `/metrics` text is captured at every scenario start and end. Power and energy are taken over the window in which requests were running, so tokens per joule and tokens per second share one time base. See the README for the summary columns.
 
 ### Reading the results
 
@@ -152,9 +152,11 @@ bench_space/
     └── <name>/<task>/<model>/
         ├── summary_<ISL>_<OSL>.md        # Markdown table (one per ISL/OSL pair)
         ├── summary_<ISL>_<OSL>.csv       # CSV summary
+        ├── monitor.csv  devices.csv      # 1 Hz monitor log for the whole run
+        ├── metrics_snapshots.jsonl       # /metrics at every scenario start and end
         └── <ISL>.<OSL>.<CONC>/
-            ├── <DEVICE>_<NUM>_monitoring_log.csv   # hardware metrics during this scenario
-            └── vllm-*.json                         # raw vLLM benchmark output
+            ├── monitor.csv  devices.csv  # the rows of this scenario
+            └── vllm-*.json               # raw vLLM benchmark output
 ```
 
 Each `summary_<ISL>_<OSL>` file contains one row per concurrency level, making it straightforward to spot where latency degrades as load increases.

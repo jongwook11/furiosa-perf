@@ -48,7 +48,8 @@ Repository = "https://github.com/furiosa-ai/furiosa-perf"
 furiosa-perf = "furiosa_perf.cli.main:cli"
 
 [project.optional-dependencies]
-furiosa-llm = ["furiosa-llm>=2026.2"]
+# furiosa-smi-py wraps the furiosa-smi apt package (libfuriosa_smi), which must be installed on the host.
+furiosa-llm = ["furiosa-llm>=2026.2", "furiosa-smi-py"]
 vllm = ["vllm>=0.20.1"]
 
 dev = [

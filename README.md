@@ -218,10 +218,29 @@ bench_space/
     └── <name>/<task>/<model>/
         ├── summary_<ISL>_<OSL>.md        # Markdown table
         ├── summary_<ISL>_<OSL>.csv       # CSV summary
+        ├── monitor.csv                   # 1 Hz: device sum/mean, server /metrics, server/client/host CPU and memory
+        ├── devices.csv                   # 1 Hz: one row per device (power, temperatures, utilization, clocks, throttle)
+        ├── metrics_snapshots.jsonl       # full /metrics text and NPU counters at every scenario start and end
         └── <ISL>.<OSL>.<CONC>/
-            ├── <DEVICE>_<NUM>_monitoring_log.csv   # per-scenario hardware metrics
-            └── vllm-*.json                         # raw vLLM benchmark output
+            ├── monitor.csv               # the rows of this scenario
+            ├── devices.csv
+            └── vllm-*.json               # raw vLLM benchmark output
 ```
+
+The monitor columns merged into each scenario's summary row:
+
+| Column | Meaning |
+|---|---|
+| `active_s` | Seconds from the first to the last sample with a running request; client start-up and teardown are excluded |
+| `mean_power`, `energy_j` | Energy integrated over the active window, and that energy divided by `active_s` |
+| `gen_tok_per_j`, `total_tok_per_j` | Generated (or prompt + generated) tokens per joule, from the server's token counters over the same window |
+| `power_steady_w`, `power_p95_w` | Mean power while at least 90 % of `max_concurrency` requests run, and the 95th percentile over the active window |
+| `window_ok` | `False` when there are fewer than 10 active samples or no server metrics. RNGD power readings take a few seconds to follow the load, so treat power, energy and busy figures of such a scenario as indicative only |
+| `throttled` | `True` if any device reported a slowdown (power, thermal or clock cap) while active |
+| `npu_busy_pct` | RNGD only, when `window_ok`: executed PE cycles over the active window's cycle capacity |
+| `server_<ttft\|itl\|e2el>_mean_ms` | Server-side mean latencies from the `/metrics` histograms; the gap to the client's means is client, network and tokenization overhead |
+| `finished_<stop\|length\|abort>` | Requests the server finished per reason during the scenario |
+| `client_cpu_peak_pct` | Peak CPU of the benchmark client while requests run (100 = one core); near 100 the client, not the server, may limit throughput |
 
 Server logs are written to `./serve_logs/`.
 
@@ -277,9 +296,10 @@ reference line, metrics) are configured in `furiosa_perf/reporting/theme.py`.
 
 ## Troubleshooting
 
-**Monitoring CSV is empty or missing**
-- NPU: requires `furiosa_smi_py`. If not installed, NPU monitoring is silently skipped.
-- GPU: requires `nvidia-smi`. If not found, GPU monitoring is silently skipped.
+**Device columns in the monitoring CSV are empty**
+- NPU: requires `furiosa-smi-py` (installed by the `furiosa-llm` extra) and the `furiosa-smi` apt package it wraps.
+- GPU: requires `nvidia-smi` on `PATH`.
+- The monitor keeps logging server `/metrics` and host usage either way; the missing probe is reported once as `[monitor] device sampling is disabled; cause: ...`.
 
 **Server fails to start**
 - Check `./serve_logs/` for the server process output.

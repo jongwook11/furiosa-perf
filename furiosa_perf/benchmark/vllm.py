@@ -237,8 +237,14 @@ class VllmPerformanceBenchmark:
             command.append(f"--port={self.port}")
         return command
 
-    def run(self) -> None:
-        """Run all scenarios sequentially and store results in :attr:`total_results`."""
+    def run(self, monitor: HardwareMonitor | None = None) -> None:
+        """Run all scenarios sequentially and store results in :attr:`total_results`.
+
+        Args:
+            monitor: Running hardware monitor; each scenario is bracketed with
+                :meth:`HardwareMonitor.begin` / :meth:`HardwareMonitor.end` and its
+                summary is merged into the scenario result.
+        """
         cwd: Path = self.base_dir.resolve()
         self.total_results = {
             "model": self.model,
@@ -248,17 +254,20 @@ class VllmPerformanceBenchmark:
             "results": [],
         }
         for scenario in self.scenarios:
-            self.total_results["results"].append(self._run_scenario(scenario, cwd))
+            self.total_results["results"].append(self._run_scenario(scenario, cwd, monitor))
 
         assert len(self.total_results["results"]) > 0, "No results collected from benchmarks"
         logger.info(f"Total results collected: {len(self.total_results['results'])}")
 
-    def _run_scenario(self, scenario: ScenarioConfig, cwd: Path) -> dict[str, Any]:
+    def _run_scenario(
+        self, scenario: ScenarioConfig, cwd: Path, monitor: HardwareMonitor | None = None
+    ) -> dict[str, Any]:
         """Execute one benchmark scenario and return the parsed result dict.
 
         Args:
             scenario: Scenario configuration to run.
             cwd: Working directory for the benchmark subprocess.
+            monitor: Hardware monitor that summarizes the scenario window, if any.
 
         Returns:
             Dict containing parsed metrics and hardware power summary.
@@ -269,7 +278,8 @@ class VllmPerformanceBenchmark:
         command = self._get_command_for_scenario(scenario)
         logger.info(f"Executing: {' '.join(command)} | cwd: {cwd}")
 
-        start_timestamp = datetime.now(timezone.utc).isoformat()
+        result_name = self._scenario_result_name(scenario)
+        window = monitor.begin(result_name) if monitor is not None else None
         env = os.environ.copy()
         if hf_token := self.env.get("HF_TOKEN"):
              env["HF_TOKEN"] = hf_token
@@ -296,18 +306,12 @@ class VllmPerformanceBenchmark:
                 f"Benchmark failed — subprocess exited with code {self.bench_process.returncode}"
             )
         self.bench_process = None
-        end_timestamp = datetime.now(timezone.utc).isoformat()
 
         result = self._parse_results("".join(output_lines), scenario)
-        result.update(
-            HardwareMonitor.get_benchmark_power_summary(
-                csv_file_path=self.base_dir / f"{self.device_name}_{self.used_device_num}_monitoring_log.csv",
-                start_dt=start_timestamp,
-                end_dt=end_timestamp,
-                target_csv_file_path=self.get_vllm_result_dir(self._scenario_result_name(scenario))
-                / f"{self.device_name}_{self.used_device_num}_monitoring_log.csv",
+        if monitor is not None and window is not None:
+            result.update(
+                monitor.end(window, scenario.max_concurrency, slice_dir=self.get_vllm_result_dir(result_name))
             )
-        )
         logger.info(f"Parsed result: {result}")
         return result
 
