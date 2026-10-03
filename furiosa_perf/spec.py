@@ -6,7 +6,7 @@ from typing import Any, TypeAlias
 
 import yaml
 
-from furiosa_perf.utils.logger import logger
+from furiosa_perf.log import logger
 
 
 @dataclass

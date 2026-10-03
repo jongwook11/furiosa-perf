@@ -45,7 +45,7 @@ Repository = "https://github.com/furiosa-ai/furiosa-perf"
 "Bug Tracker" = "https://github.com/furiosa-ai/furiosa-perf/issues"
 
 [project.scripts]
-furiosa-perf = "furiosa_perf.cli.main:cli"
+furiosa-perf = "furiosa_perf.cli:cli"
 
 [project.optional-dependencies]
 # furiosa-smi-py wraps the furiosa-smi apt package (libfuriosa_smi), which must be installed on the host.

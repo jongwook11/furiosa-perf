@@ -16,7 +16,7 @@ from typing import Any
 
 import psutil
 
-from furiosa_perf.utils.logger import logger
+from furiosa_perf.log import logger
 
 # Bit 0 of the throttle mask means "idle" for both RNGD (THROTTLE_REASON_IDLE) and
 # NVIDIA (clocks_event_reasons GpuIdle); it is not a slowdown, so it is masked out.

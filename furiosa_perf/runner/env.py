@@ -8,7 +8,7 @@ import sys
 from collections import namedtuple
 from typing import Any, Callable
 
-from furiosa_perf.utils.logger import logger
+from furiosa_perf.log import logger
 
 
 def run_lambda(cmd: str) -> tuple[int, str, str]:

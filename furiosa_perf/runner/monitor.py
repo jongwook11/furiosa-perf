@@ -33,6 +33,7 @@ from typing import Any, TextIO
 import pandas as pd
 import requests
 
+from furiosa_perf.log import logger, setup_logger
 from furiosa_perf.runner import server_metrics
 from furiosa_perf.runner.devices import (
     DEVICE_COLUMNS,
@@ -43,7 +44,6 @@ from furiosa_perf.runner.devices import (
     make_sampler,
     npu_busy_pct,
 )
-from furiosa_perf.utils.logger import logger, setup_logger
 
 MONITOR_CSV = "monitor.csv"
 DEVICES_CSV = "devices.csv"

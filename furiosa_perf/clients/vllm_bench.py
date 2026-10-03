@@ -11,9 +11,9 @@ from typing import Any
 
 from pytablewriter import MarkdownTableWriter
 
+from furiosa_perf.log import logger
 from furiosa_perf.runner.monitor import HardwareMonitor
-from furiosa_perf.utils.config import PerformanceBenchConfig, ScenarioConfig
-from furiosa_perf.utils.logger import logger
+from furiosa_perf.spec import PerformanceBenchConfig, ScenarioConfig
 
 WORKSPACE = "./bench_space"
 

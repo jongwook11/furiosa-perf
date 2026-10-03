@@ -1,13 +1,21 @@
-"""CLI ``run`` command — orchestrates server launch, benchmark, and teardown."""
+"""Entry point for the furiosa-perf CLI: the ``run`` and ``report`` commands."""
 
-from pathlib import Path
+import warnings
 
-import click
+# requests emits RequestsDependencyWarning when urllib3 or chardet/charset-normalizer
+# versions are newer than the range it was tested against. Suppress at the CLI boundary
+# since the functionality is unaffected.
+warnings.filterwarnings("ignore", message=".*doesn't match a supported version.*")
 
-from furiosa_perf.runner.runner import BenchmarkRunner
-from furiosa_perf.utils.collect_env import SystemDetector
-from furiosa_perf.utils.config import APIServerConfigLoader, PerformanceBenchConfigLoader
-from furiosa_perf.utils.logger import logger, setup_logger
+from pathlib import Path  # noqa: E402
+
+import click  # noqa: E402
+
+from furiosa_perf.log import logger, setup_logger  # noqa: E402
+from furiosa_perf.reporting.command import report  # noqa: E402
+from furiosa_perf.runner.env import SystemDetector  # noqa: E402
+from furiosa_perf.runner.runner import BenchmarkRunner  # noqa: E402
+from furiosa_perf.spec import APIServerConfigLoader, PerformanceBenchConfigLoader  # noqa: E402
 
 
 @click.command()
@@ -70,3 +78,15 @@ def run(
     logger.info("Benchmarking started.")
     runner.execute(model_id)
     logger.info("Benchmarking completed.")
+
+
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+def cli() -> None:
+    """furiosa-perf: LLM serving performance benchmark CLI."""
+
+
+cli.add_command(run)
+cli.add_command(report)
+
+if __name__ == "__main__":
+    cli()
