@@ -393,7 +393,7 @@ def report(
 
             csv_bundle = []
             for raw_data_file in raw_data_files:
-                new_file_name = f"{model}_{raw_data_file.parents[3].name}_{task}.csv"
+                new_file_name = f"{model}_{BenchmarkMetricLoader.source_label(raw_data_file)}_{task}.csv"
                 shutil.copy(raw_data_file, f"{out_dir / 'csv'}/{new_file_name}")
                 csv_bundle.append(f"{out_dir / 'csv'}/{new_file_name}")
 

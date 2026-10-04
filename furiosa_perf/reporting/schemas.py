@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -8,9 +9,14 @@ from scipy.optimize import OptimizeWarning, curve_fit
 class BenchmarkMetricLoader:
     @staticmethod
     def _extract_device_and_version(summary_csv_path: str | Path) -> tuple[str, str, str, str]:
-        """Extract device metadata from a summary.csv path.
+        """Return ``(device, num, backend, version)`` of the run a summary.csv belongs to.
 
-        The result folder follows the benchmark output pattern
+        Runs written since the results layout change carry a ``run.json`` next to the
+        summary; its fields are used and the path is not parsed. A non-default
+        parallel layout is appended to the device, e.g. ``RNGD-tp1-dp2``.
+
+        Older runs (``bench_space``) have no ``run.json``; their result folder follows
+        the pattern
         ``<DEVICE>_<NUM>_<BACKEND>[_<VERSION>]`` (e.g.
         ``RNGD_4_furiosa-llm_2026.1.0rc2`` or ``H100-80GB_8_vllm_0.13.0``). The
         trailing ``<VERSION>`` segment is optional: ``furiosa-perf run`` writes
@@ -25,10 +31,21 @@ class BenchmarkMetricLoader:
             from the result folder name.
         """
         p = Path(summary_csv_path)
+        run_file = p.parent / "run.json"
+        if run_file.exists():
+            run = json.loads(run_file.read_text())
+            device = run["hardware"] + (f"-{run['layout']}" if run.get("layout") else "")
+            return device, str(run["num_devices"]), run["backend"], run["backend_version"]
         parts = p.parents[3].name.split("_")
         device, num, backend = parts[0], parts[1], parts[2]
         version = "_".join(parts[3:])  # "" when no version segment is present
         return device, num, backend, version
+
+    @staticmethod
+    def source_label(summary_csv_path: str | Path) -> str:
+        """``<device>_<num>_<backend>_<version>`` of a run, for naming exported files."""
+        device, num, backend, version = BenchmarkMetricLoader._extract_device_and_version(summary_csv_path)
+        return "_".join(part for part in (device, num, backend, version) if part)
 
     @staticmethod
     def load_offline_benchmark_metric(

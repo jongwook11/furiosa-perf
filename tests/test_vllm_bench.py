@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from furiosa_perf.clients.vllm_bench import judge, point_name, summary_row
+from furiosa_perf.clients.vllm_bench import judge, summary_row
 
 TEXT_POINT = {"random-input-len": 1024, "random-output-len": 128, "max-concurrency": 8, "num-prompts": 24}
 
@@ -25,19 +25,6 @@ def result(**overrides: Any) -> dict[str, Any]:
         "mean_e2el_ms": 1810.0,
         **overrides,
     }
-
-
-@pytest.mark.parametrize(
-    ("point", "expected"),
-    [
-        (TEXT_POINT, "1024.128.8"),
-        ({"random-input-len": 512, "random-batch-size": 5, "max-concurrency": 4}, "512.b5.4"),
-        ({"random-input-len": 256, "max-concurrency": 1}, "256.1"),
-    ],
-)
-def test_point_name_matches_the_existing_directory_names(point: dict[str, Any], expected: str) -> None:
-    """Generation, rerank and embedding points keep the directory names earlier runs used."""
-    assert point_name(point) == expected
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,60 @@ def run_lambda(cmd: str) -> tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 
+# furiosa_smi_py Arch variant -> device name used in result paths.
+NPU_ARCH_NAMES = {"Rngd": "RNGD", "RngdS": "RNGD-S", "RngdPlus": "RNGD-PLUS", "RngdMax": "RNGD-MAX"}
+
+
+def npu_arch_name(arch: str) -> str:
+    """Result-path name of an RNGD arch such as ``"Arch.RngdMax"`` or ``"Rngd"``."""
+    variant = arch.split(".")[-1]
+    return NPU_ARCH_NAMES.get(variant, variant.upper())
+
+
+def gpu_product_name(raw: str) -> str:
+    """Result-path name of an NVIDIA product, keeping every word that tells variants apart.
+
+    ``"NVIDIA H100 80GB HBM3"`` -> ``"H100-80GB-HBM3"``,
+    ``"NVIDIA RTX PRO 6000 Blackwell Server Edition"`` -> ``"RTX-PRO-6000-Blackwell-Server-Edition"``.
+    """
+    words = raw.strip().split()
+    if words and words[0].upper() == "NVIDIA":
+        words = words[1:]
+    return "-".join("".join(c for c in word if c.isalnum()) for word in words if word)
+
+
+def _watts(raw: str | None) -> float | None:
+    """A ``power.limit``-style nvidia-smi cell in watts, ``None`` if missing or N/A."""
+    try:
+        return float(raw) if raw is not None else None
+    except ValueError:
+        return None
+
+
+def device_label(name: str, devices: list[dict[str, Any]]) -> str:
+    """Device name for result paths, with a suffix only when a power setting is not the default.
+
+    Args:
+        name: Device name, e.g. ``"RNGD"`` or ``"H100-80GB-HBM3"``.
+        devices: Metadata of the devices the server uses.
+
+    Returns:
+        ``name``, ``name@<W>W`` when a GPU power limit differs from its default
+        (the lowest one if they differ), or ``name@powersave`` when an RNGD runs
+        the PowerSave governor.
+    """
+    lowered = [
+        d["power_limit_w"]
+        for d in devices
+        if d.get("power_limit_w") and d.get("default_power_limit_w") and d["power_limit_w"] != d["default_power_limit_w"]
+    ]
+    if lowered:
+        return f"{name}@{round(min(lowered))}W"
+    if any(str(d.get("governor", "")).lower() == "powersave" for d in devices):
+        return f"{name}@powersave"
+    return name
+
+
 class SystemDetector:
     """Detect OS, Python version, framework version, and hardware info."""
 
@@ -140,15 +194,17 @@ class SystemDetector:
             for device in furiosa_smi_py.list_devices():
                 device_info = device.device_info()
                 mem_util = device.memory_utilization()
-                arch = str(device_info.arch()).upper()
+                arch = npu_arch_name(str(device_info.arch()))
                 if npus["name"] != arch:
                     npus["name"] = arch
                     total_bytes = sum(b.total_bytes() for b in mem_util.dram().memory())
                     npus["memory"] = f"{round(total_bytes / (1024 ** 3), 2)} GiB"
                 npus["devices"].append(
                     {
+                        "name": arch,
                         "driver_version": str(furiosa_smi_py.driver_info()),
                         "firmware_version": str(device_info.firmware_version()),
+                        "governor": str(device.governor_profile()).split(".")[-1],
                     }
                 )
         except ImportError as e:
@@ -165,31 +221,29 @@ class SystemDetector:
         unavailable or returns a non-zero exit code.
         """
 
-        def _normalize_name(raw: str) -> str:
-            parts = raw.split()
-            if len(parts) >= 3 and parts[1] == "RTX" and "6000" in parts:
-                return "RTX-PRO-6000"
-            return "-".join(parts[1:3]).upper()
-
         gpus: dict[str, Any] = {"name": "Unknown", "memory": "0 GiB", "devices": []}
         try:
             rc, out, err = run_lambda(
-                "nvidia-smi --query-gpu=name,memory.total,driver_version,vbios_version --format=csv,nounits"
+                "nvidia-smi --query-gpu=name,memory.total,driver_version,vbios_version,power.limit,power.default_limit"
+                " --format=csv,nounits"
             )
             if rc != 0:
                 logger.warning(f"NVIDIA GPU detection failed: {err}")
                 return gpus
 
             for row in csv.DictReader(out.strip().split("\n")):
-                name = _normalize_name(row["name"])
+                name = gpu_product_name(row["name"])
                 if gpus["name"] != name:
                     gpus["name"] = name
                     mem_mib = int(row[" memory.total [MiB]"])
                     gpus["memory"] = f"{round(mem_mib / 1024, 2)} GiB"
                 gpus["devices"].append(
                     {
-                        "driver_version": row[" driver_version"],
-                        "firmware_version": row[" vbios_version"],
+                        "name": name,
+                        "driver_version": row[" driver_version"].strip(),
+                        "firmware_version": row[" vbios_version"].strip(),
+                        "power_limit_w": _watts(row.get(" power.limit [W]")),
+                        "default_power_limit_w": _watts(row.get(" power.default_limit [W]")),
                     }
                 )
         except Exception as e:

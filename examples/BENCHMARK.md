@@ -98,19 +98,15 @@ Short-context scenarios (128 tokens in/out) sweep a wider concurrency range to f
 
 ## Output structure
 
-Results are written under `./bench_space/`:
+Results are written under `./results/` (see the README for every file):
 
 ```
-bench_space/
-└── <DEVICE>_<NUM>_<BACKEND>_<VERSION>/
-    └── <name>/<task>/<model>/
-        ├── summary_<ISL>_<OSL>.md        # Markdown table (one per ISL/OSL pair)
-        ├── summary_<ISL>_<OSL>.csv       # CSV summary
-        ├── monitor.csv  devices.csv      # 1 Hz monitor log for the whole run
-        ├── metrics_snapshots.jsonl       # /metrics at every scenario start and end
-        └── <ISL>.<OSL>.<CONC>/
-            ├── monitor.csv  devices.csv  # the rows of this scenario
-            └── vllm-*.json               # raw vLLM benchmark output
+results/baseline/<DEVICE>_<NUM>[-<LAYOUT>]_<BACKEND>_<VERSION>/<task>/<org>--<model>/
+├── run.json                      # the run: hardware, versions, server command, preset
+├── summary_<ISL>_<OSL>.md|.csv   # one row per concurrency level
+└── i<ISL>-o<OSL>-c<CONC>/
+    ├── record.json               # the point, self-describing
+    └── result.json               # raw vllm bench result
 ```
 
 Each `summary_<ISL>_<OSL>` file contains one row per concurrency level, making it straightforward to spot where latency degrades as load increases.

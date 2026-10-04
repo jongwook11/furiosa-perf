@@ -101,17 +101,18 @@ def _process_name(pid: int) -> str:
 class APIServerManager:
     """Manage the lifecycle of a vLLM or furiosa-llm API server subprocess."""
 
-    def __init__(self, server: Server) -> None:
+    def __init__(self, server: Server, log_path: Path) -> None:
         """Initialise the manager without starting the server.
 
         Args:
             server: What to launch.
+            log_path: File the server's output is appended to.
         """
         self.server = server
         self.server_process: subprocess.Popen[str] | None = None
         self.server_pid = -1
         self._log_file: TextIO | None = None
-        self._log_path: Path | None = None
+        self._log_path = log_path
 
     @property
     def base_url(self) -> str:
@@ -152,11 +153,10 @@ class APIServerManager:
         command = " ".join(argv)
         logger.info(f"Starting server: {command}")
 
-        log_dir = Path("./serve_logs")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        self._log_path = log_dir / f"serve_{self.server.model.replace('/', '_')}_{int(time.time())}.log"
         logger.info(f"Server log: {self._log_path}")
-        self._log_file = open(self._log_path, "w", buffering=1)  # noqa: SIM115, PTH123 - closed in stop()
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_file = open(self._log_path, "a", buffering=1)  # noqa: SIM115, PTH123 - closed in stop()
+        self._log_file.write(f"=== {time.strftime('%Y-%m-%dT%H:%M:%S%z')} {command}\n")
 
         self.server_process = subprocess.Popen(
             argv, env=env, stdout=self._log_file, stderr=self._log_file, text=True, start_new_session=True
@@ -212,7 +212,7 @@ class APIServerManager:
 
     def _log_tail(self) -> str:
         """Last lines of the server log, for error messages."""
-        if self._log_path is None or not self._log_path.exists():
+        if not self._log_path.exists():
             return ""
         lines = self._log_path.read_text(errors="replace").splitlines()[-LOG_TAIL_LINES:]
         return "\n".join(lines)
@@ -226,7 +226,7 @@ class APIServerManager:
         start = time.time()
         log_pos = 0
         while True:
-            if self._log_path and self._log_path.exists():
+            if self._log_path.exists():
                 with self._log_path.open() as f:
                     f.seek(log_pos)
                     for line in f:

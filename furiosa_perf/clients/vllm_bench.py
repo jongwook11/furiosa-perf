@@ -19,14 +19,13 @@ from typing import Any
 from pytablewriter import MarkdownTableWriter
 
 from furiosa_perf.log import logger
+from furiosa_perf.results.store import RECORD_FILE, check_unique_point_names, point_name, read_json, write_json
 from furiosa_perf.runner.monitor import HardwareMonitor
 from furiosa_perf.runner.server import option_args
 from furiosa_perf.spec import Preset
 
 VLLM_BENCH_VERSION = "0.30.0"
 CLIENT_PYTHON = "3.12"
-WORKSPACE = "./bench_space"
-RESULT_GROUP = "vllm"  # directory level between device and task, kept from the earlier layout
 RESULT_FILE = "result.json"
 BENCH_LOG = "bench.log"
 
@@ -73,17 +72,6 @@ def ensure_client() -> Path:
                 f"failed to set up the benchmark client ({' '.join(step)}); cause: {done.stderr.strip()}"
             )
     return python
-
-
-def point_name(point: dict[str, Any]) -> str:
-    """Directory name of a point: ``<isl>.<osl>.<conc>``, ``<isl>.b<docs>.<conc>`` or ``<isl>.<conc>``."""
-    parts = [str(point.get("random-input-len"))]
-    if point.get("random-output-len"):
-        parts.append(str(point["random-output-len"]))
-    elif "random-batch-size" in point:
-        parts.append(f"b{point['random-batch-size']}")
-    parts.append(str(point.get("max-concurrency")))
-    return ".".join(parts)
 
 
 def judge(point: dict[str, Any], result: dict[str, Any] | None, returncode: int) -> str:
@@ -162,39 +150,39 @@ class VllmPerformanceBenchmark:
         self,
         preset: Preset,
         model: str,
-        device_name: str,
-        used_device_num: int,
-        parallel_label: str,
-        backend: str,
         host: str,
         port: int,
+        run_dir: Path,
+        identity: dict[str, Any],
+        resume: bool = False,
     ) -> None:
         """Store what to run and where results go.
 
         Args:
             preset: Points and task of the benchmark.
             model: Model ID the server reports on ``/v1/models``.
-            device_name: Accelerator name, used in result paths.
-            used_device_num: Number of devices the server uses.
-            parallel_label: :attr:`furiosa_perf.spec.Parallel.label`.
-            backend: ``<backend>_<version>`` of the server, used in result paths.
             host: API server host.
             port: API server port.
+            run_dir: Directory of this run (see :mod:`furiosa_perf.results.store`).
+            identity: Fields copied into every ``record.json`` so a point is
+                self-describing: kind, task, model, hardware, parallelism, versions.
+            resume: Keep points whose ``record.json`` is valid instead of rerunning them.
+
+        Raises:
+            ValueError: If two points of the preset would share a directory.
         """
+        check_unique_point_names(preset.points)
         self.preset = preset
         self.task = preset.task
         self.model = model
-        self.device_name = device_name
-        self.used_device_num = used_device_num
-        self.parallel_label = parallel_label
-        self.backend = backend
         self.host = host
         self.port = port
+        self.run_dir = run_dir
+        self.identity = identity
+        self.resume = resume
         self.python: Path | None = None
         self.bench_process: subprocess.Popen[str] | None = None
         self.total_results: dict[str, Any] = {"results": []}
-        self.base_dir = Path(WORKSPACE)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def setup(self) -> None:
         """Make sure the pinned client environment exists."""
@@ -216,15 +204,14 @@ class VllmPerformanceBenchmark:
         Raises:
             RuntimeError: If the server stopped during the run.
         """
-        self.total_results = {
-            "model": self.model,
-            "task": self.task,
-            "device_name": self.device_name,
-            "used_device_num": self.used_device_num,
-            "results": [],
-        }
+        self.total_results = {"model": self.model, "task": self.task, "results": []}
         points = self.preset.points
         for index, point in enumerate(points):
+            kept = self._kept_row(point)
+            if kept is not None:
+                logger.info(f"point {point_name(point)} is already recorded as valid; keeping it")
+                self.total_results["results"].append(kept)
+                continue
             row = self._run_point(point, monitor)
             self.total_results["results"].append(row)
             if row["ok"]:
@@ -238,6 +225,15 @@ class VllmPerformanceBenchmark:
 
         num_invalid = sum(not row["ok"] for row in self.total_results["results"])
         logger.info(f"{len(points)} points run, {num_invalid} invalid")
+
+    def _kept_row(self, point: dict[str, Any]) -> dict[str, Any] | None:
+        """With ``resume``, the summary row of a point already recorded as valid."""
+        if not self.resume:
+            return None
+        record = read_json(self.point_dir(point_name(point)) / RECORD_FILE)
+        if record is None or record.get("point") != point or not record.get("summary", {}).get("ok"):
+            return None
+        return dict(record["summary"])
 
     def _command(self, point: dict[str, Any], result_dir: Path) -> list[str]:
         """``vllm bench serve`` command line for one point."""
@@ -253,12 +249,13 @@ class VllmPerformanceBenchmark:
     def _run_point(self, point: dict[str, Any], monitor: HardwareMonitor | None) -> dict[str, Any]:
         """Run one point and return its summary row (plus monitor fields)."""
         name = point_name(point)
-        result_dir = self.get_vllm_result_dir(name)
+        result_dir = self.point_dir(name)
         result_path = result_dir / RESULT_FILE
         result_path.unlink(missing_ok=True)  # never read a previous run's result
         command = self._command(point, result_dir)
         logger.info(f"Executing: {' '.join(command)}")
 
+        started = datetime.now(timezone.utc).isoformat()
         window = monitor.begin(name) if monitor is not None else None
         with (result_dir / BENCH_LOG).open("w") as log:
             self.bench_process = subprocess.Popen(
@@ -266,7 +263,7 @@ class VllmPerformanceBenchmark:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                cwd=self.base_dir.resolve(),
+                cwd=result_dir,
                 bufsize=1,
                 start_new_session=True,
             )
@@ -283,6 +280,17 @@ class VllmPerformanceBenchmark:
         row = summary_row(point, result, judge(point, result, returncode))
         if monitor is not None and window is not None:
             row.update(monitor.end(window, int(point.get("max-concurrency") or 0), slice_dir=result_dir))
+        record = {
+            **self.identity,
+            "client": "vllm-bench",
+            "client_version": VLLM_BENCH_VERSION,
+            "name": name,
+            "point": point,
+            "started": started,
+            "finished": datetime.now(timezone.utc).isoformat(),
+            "summary": row,
+        }
+        write_json(result_dir / RECORD_FILE, record)
         logger.info(f"Parsed result: {row}")
         return row
 
@@ -300,14 +308,14 @@ class VllmPerformanceBenchmark:
             f"{desc}\n"
             f"* Performance Benchmark - {self.preset.kind} {self.task} with vllm bench {VLLM_BENCH_VERSION}\n"
             f"* Model Info: {self.model}\n"
-            f"* Device Info: {self.device_name} x {self.used_device_num} {self.parallel_label}\n"
+            f"* Device Info: {self.identity['hardware']} x {self.identity['num_devices']} {self.identity['layout']}\n"
             f"* date: {datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}\n"
             f"* Scenario Results:"
         )
         by_length: dict[str, list[list[Any]]] = defaultdict(list)
         for row in rows:
             by_length[self._length_key(row["Input Tokens"], row["Output Tokens"])].append(list(row.values()))
-        result_root = self.get_vllm_result_dir("")
+        result_root = self.run_dir
         for key, values in by_length.items():
             self._write_summary_files(result_root, headers, values, report_desc, suffix=f"_{key}", log=True)
         all_values = [value for values in by_length.values() for value in values]
@@ -334,26 +342,11 @@ class VllmPerformanceBenchmark:
         osl = f"{output_tokens // 1024}k" if output_tokens >= 1024 else str(output_tokens)
         return f"{isl}_{osl}"
 
-    def get_vllm_result_dir(self, result_name: str) -> Path:
-        """Return (and create) a result directory under the run's model directory.
-
-        Args:
-            result_name: Point name, or ``""`` for the model directory itself.
-
-        Returns:
-            Absolute path of the directory.
-        """
-        layout = f"-{self.parallel_label}" if self.parallel_label else ""
-        result_dir = (
-            self.base_dir
-            / f"{self.device_name}_{self.used_device_num}{layout}_{self.backend}"
-            / RESULT_GROUP
-            / self.task
-            / self.model.split("/")[-1]
-            / result_name
-        )
-        result_dir.mkdir(parents=True, exist_ok=True)
-        return result_dir.resolve()
+    def point_dir(self, name: str) -> Path:
+        """Return (and create) the directory of one point inside the run directory."""
+        path = self.run_dir / name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def stop(self) -> None:
         """Terminate the running client process group, if any."""

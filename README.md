@@ -101,6 +101,9 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 |---|---|---|---|
 | `--server-config` | ✓ | — | API server config YAML (backend, model, devices, …) |
 | `--preset` | ✓ | — | Benchmark preset: a bundled name such as `baseline/text-gen`, or a YAML file |
+| `--output-dir` | | `results` | Root of the results tree |
+| `--resume` | | off | Finish a run already in its results directory, keeping valid points |
+| `--overwrite` | | off | Delete a run already in its results directory and start over |
 | `--reuse-server` | | off | Benchmark a server already running on the configured port instead of launching one |
 | `--check` | | off | Validate the server config and preset, print the server command (preset server options applied) and point count, and exit (no hardware needed) |
 
@@ -227,23 +230,29 @@ matrix:                   # one point per combination; list values are expanded
 
 ## Outputs
 
-Results are written under `./bench_space/` relative to your working directory.
+Results are written under `--output-dir` (default `./results`), one directory per run:
 
 ```
-bench_space/
-└── <DEVICE>_<NUM>_<BACKEND>_<VERSION>/
-    └── <name>/<task>/<model>/
-        ├── summary_<ISL>_<OSL>.md        # Markdown table
-        ├── summary_<ISL>_<OSL>.csv       # CSV summary
-        ├── monitor.csv                   # 1 Hz: device sum/mean, server /metrics, server/client/host CPU and memory
-        ├── devices.csv                   # 1 Hz: one row per device (power, temperatures, utilization, clocks, throttle)
-        ├── metrics_snapshots.jsonl       # full /metrics text and NPU counters at every scenario start and end
-        └── <ISL>.<OSL>.<CONC>/
-            ├── monitor.csv               # the rows of this scenario
-            ├── devices.csv
-            ├── result.json               # raw vllm bench result
-            └── bench.log                 # client console output
+results/
+└── <kind>/                                        # baseline
+    └── <DEVICE>_<NUM>[-<LAYOUT>]_<BACKEND>_<VERSION>/   # e.g. RNGD_4_furiosa-llm_2026.4.0, H100-80GB-HBM3_2-tp1-dp2_vllm_0.30.0
+        └── <task>/<org>--<model>/                 # e.g. text-gen/furiosa-ai--Qwen3-8B-FP8
+            ├── run.json                  # what was run, on what, with which versions; status and point counts
+            ├── server.log                # API server output
+            ├── summary_<ISL>_<OSL>.md|.csv  summary.md|.csv
+            ├── monitor.csv               # 1 Hz: device sum/mean, server /metrics, server/client/host CPU and memory
+            ├── devices.csv               # 1 Hz: one row per device (power, temperatures, utilization, clocks, throttle)
+            ├── metrics_snapshots.jsonl   # full /metrics text and NPU counters at every point start and end
+            └── i<ISL>-o<OSL>-c<CONC>/    # one directory per point (i<ISL>-b<DOCS>-c<CONC> for rerank, i<ISL>-c<CONC> for embedding)
+                ├── record.json           # the point, self-describing: model, hardware, versions, options, ok, metrics
+                ├── result.json           # raw vllm bench result
+                ├── bench.log             # client console output
+                └── monitor.csv  devices.csv   # the rows of this point
 ```
+
+- `DEVICE` is the full product name (`H100-80GB-HBM3`, `H100-NVL`, `RTX-PRO-6000-Blackwell-Server-Edition`, `RNGD`), with `@<W>W` when a GPU power limit is not its default or `@powersave` for an RNGD on the PowerSave governor. `LAYOUT` appears only for non-default parallelism.
+- Read `run.json` / `record.json` rather than parsing paths; they hold every field the path encodes and more.
+- A run directory that already holds a run is not touched: pass `--resume` to finish it (points recorded as valid are kept, the rest run again) or `--overwrite` to start over.
 
 The monitor columns merged into each scenario's summary row:
 
@@ -260,13 +269,6 @@ The monitor columns merged into each scenario's summary row:
 | `finished_<stop\|length\|abort>` | Requests the server finished per reason during the scenario |
 | `client_cpu_peak_pct` | Peak CPU of the benchmark client while requests run (100 = one core); near 100 the client, not the server, may limit throughput |
 
-Server logs are written to `./serve_logs/`.
-
-**Example path:**
-
-```
-bench_space/RNGD_4_furiosa-llm_2026.4.0/vllm/text-gen/EXAONE-4.0-32B-FP8/summary.csv
-```
 
 ---
 
@@ -276,7 +278,7 @@ Turn one or more benchmark runs into a self-contained interactive HTML report:
 
 ```bash
 furiosa-perf report \
-  --benchmark-result-path ./bench_space \
+  --benchmark-result-path ./results \
   --model-list all \
   --task-list all \
   --report-path ./report
@@ -320,7 +322,7 @@ reference line, metrics) are configured in `furiosa_perf/reporting/theme.py`.
 - The monitor keeps logging server `/metrics` and host usage either way; the missing probe is reported once as `[monitor] device sampling is disabled; cause: ...`.
 
 **Server fails to start**
-- Check `./serve_logs/` for the server process output.
+- Check `server.log` in the run directory; the error message also shows its last lines.
 - Run the backend command directly to inspect startup errors.
 
 **`HF_TOKEN` not set for gated models**

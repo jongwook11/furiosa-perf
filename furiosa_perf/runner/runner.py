@@ -1,12 +1,17 @@
 """Benchmark orchestration: server -> monitor -> benchmark client -> teardown."""
 
 import signal
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
 
-from furiosa_perf.clients.vllm_bench import VllmPerformanceBenchmark
+from furiosa_perf.clients.vllm_bench import VLLM_BENCH_VERSION, VllmPerformanceBenchmark
 from furiosa_perf.log import logger
+from furiosa_perf.results.store import RUN_FILE, SERVER_LOG, prepare_run_dir, run_dir, write_json
+from furiosa_perf.runner.env import device_label
 from furiosa_perf.runner.monitor import HardwareMonitor, MonitorConfig
 from furiosa_perf.runner.server import APIServerManager
 from furiosa_perf.spec import Preset, Server
@@ -16,64 +21,118 @@ class BenchmarkRunner:
     """Orchestrate the full benchmark lifecycle: server → benchmark → teardown.
 
     Owns the :class:`APIServerManager` and :class:`VllmPerformanceBenchmark`
-    instances and coordinates their startup, monitoring, and cleanup.
+    instances, coordinates their startup, monitoring and cleanup, and keeps
+    ``run.json`` of the run directory up to date.
     """
 
-    def __init__(self, system_info: Any, server: Server, preset: Preset) -> None:
-        """Store configuration for later use in :meth:`execute`.
+    def __init__(
+        self,
+        system_info: Any,
+        server: Server,
+        preset: Preset,
+        output_dir: Path,
+        resume: bool = False,
+        overwrite: bool = False,
+    ) -> None:
+        """Resolve the run directory and the fields every record carries.
 
         Args:
             system_info: :class:`SystemDetector.SystemEnv` namedtuple with OS/HW info.
             server: What API server to launch, with the preset's server options applied.
             preset: What to measure.
+            output_dir: Root of the results tree.
+            resume: Continue a run already in the run directory.
+            overwrite: Replace a run already in the run directory.
         """
         self.system_info = system_info
         self.server = server
         self.preset = preset
+        self.resume = resume
+        self.overwrite = overwrite
+
+        hardware = system_info.hardware[server.hardware_type]
+        used = [hardware["devices"][i] for i in server.devices if i < len(hardware["devices"])]
+        product = used[0].get("name", hardware["name"]) if used else hardware["name"]
+        backend, _, backend_version = system_info.runtime.partition("_")
+        # The served ID is known before launch, so a conflicting run is found without starting the server.
+        self.model = str(server.args.get("served-model-name") or server.model)
+        self.identity: dict[str, Any] = {
+            "kind": preset.kind,
+            "task": preset.task,
+            "model": self.model,
+            "hardware": device_label(product, used),
+            "hardware_product": product,
+            "num_devices": len(server.devices),
+            "devices": server.devices,
+            "layout": server.parallel.label,
+            "parallel": asdict(server.parallel),
+            "backend": backend,
+            "backend_version": backend_version,
+        }
+        self.run_dir = run_dir(
+            output_dir,
+            preset.kind,
+            self.identity["hardware"],
+            len(server.devices),
+            server.parallel.label,
+            system_info.runtime,
+            preset.task,
+            self.model,
+        )
 
     def execute(self, reuse_server: bool = False) -> list[Any]:
-        """Run the full benchmark pipeline and return per-scenario results.
+        """Run the full benchmark pipeline and return per-point summary rows.
 
         Sequence:
-            1. Start the API server.
-            2. Query ``/v1/models`` to resolve the served model ID.
-            3. Set up and run the vLLM benchmark.
-            4. Start hardware monitoring alongside the benchmark.
-            5. On completion or error, stop all components in reverse order.
+            1. Prepare the run directory (refusing to mix runs) and write ``run.json``.
+            2. Start the API server.
+            3. Set up the client and start hardware monitoring.
+            4. Run every point.
+            5. On completion or error, stop everything and finish ``run.json``.
 
         Args:
             reuse_server: Use a server already running on the configured port.
 
         Returns:
-            List of per-scenario result dicts from :attr:`VllmPerformanceBenchmark.total_results`.
+            List of per-point summary rows.
 
         Raises:
             Exception: Re-raises any exception from server startup or benchmark execution.
         """
-        api_server = APIServerManager(self.server)
+        prepare_run_dir(self.run_dir, self.resume, self.overwrite)
+        logger.info(f"Results: {self.run_dir}")
+        run_info = self._run_info()
+        write_json(self.run_dir / RUN_FILE, run_info)
+
+        api_server = APIServerManager(self.server, log_path=self.run_dir / SERVER_LOG)
         benchmark: VllmPerformanceBenchmark | None = None
         monitor: HardwareMonitor | None = None
         desc = ""
+        status = "failed"
 
         try:
             logger.info(f"Starting server for {self.server.model}")
             server_command = api_server.start(reuse_running=reuse_server)
+            run_info["server"]["command"] = server_command
+            write_json(self.run_dir / RUN_FILE, run_info)
             desc = (
                 f"* Ubuntu Version: {self.system_info.os}\n"
                 f"* Python Version: {self.system_info.python}\n"
                 f"* Framework Version: {self.system_info.runtime}\n"
                 f"* API Server Command: {server_command}"
             )
+            served = self._fetch_pretrained_id(api_server)
+            if served != self.model:
+                logger.warning(f"the server reports model '{served}', the results are stored as '{self.model}'")
 
             benchmark = VllmPerformanceBenchmark(
                 preset=self.preset,
-                model=self._fetch_pretrained_id(api_server),
-                device_name=self.system_info.hardware[self.server.hardware_type]["name"],
-                used_device_num=len(self.server.devices),
-                parallel_label=self.server.parallel.label,
-                backend=self.system_info.runtime,
+                model=served,
                 host=self.server.host,
                 port=self.server.port,
+                run_dir=self.run_dir,
+                identity=self.identity,
+                resume=self.resume,
             )
             benchmark.setup()
 
@@ -82,14 +141,19 @@ class BenchmarkRunner:
                     host=self.server.host,
                     port=self.server.port,
                     server_pid=api_server.server_pid,
-                    device_name=benchmark.device_name,
+                    # The monitor picks its sampler by name: "RNGD" for every NPU, the product for GPUs.
+                    device_name="RNGD" if self.server.hardware_type == "npu" else self.identity["hardware_product"],
                     device_indices=self.server.devices,
-                    log_dir=benchmark.get_vllm_result_dir(""),
+                    log_dir=self.run_dir,
                 )
             )
             monitor.start()
             benchmark.run(monitor, server_alive=lambda: api_server.served_model() is not None)
+            status = "finished"
 
+        except KeyboardInterrupt:
+            status = "interrupted"
+            raise
         except Exception:
             logger.exception("Benchmark execution failed.")
             raise
@@ -97,10 +161,45 @@ class BenchmarkRunner:
             old_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
             try:
                 self._cleanup(benchmark, monitor, api_server, desc)
+                rows = benchmark.total_results["results"] if benchmark is not None else []
+                run_info.update(
+                    status=status,
+                    finished=datetime.now(timezone.utc).isoformat(),
+                    num_points=len(rows),
+                    num_invalid=sum(not row["ok"] for row in rows),
+                )
+                write_json(self.run_dir / RUN_FILE, run_info)
             finally:
                 signal.signal(signal.SIGINT, old_sigint)
 
         return benchmark.total_results["results"]  # type: ignore[no-any-return]
+
+    def _run_info(self) -> dict[str, Any]:
+        """Initial content of ``run.json``: what is run, on what, with which versions."""
+        hardware = self.system_info.hardware[self.server.hardware_type]
+        return {
+            **self.identity,
+            "status": "running",
+            "started": datetime.now(timezone.utc).isoformat(),
+            "finished": None,
+            "client": self.preset.client,
+            "client_version": VLLM_BENCH_VERSION,
+            "python": self.system_info.python,
+            "os": self.system_info.os,
+            "device_info": [hardware["devices"][i] for i in self.server.devices if i < len(hardware["devices"])],
+            "server": {
+                "backend": self.server.backend,
+                "model": self.server.model,
+                "env": str(self.server.env),
+                "host": self.server.host,
+                "port": self.server.port,
+                "args": self.server.args,
+                "command": None,
+            },
+            "preset": {"server": self.preset.server, "points": self.preset.points},
+            "num_points": len(self.preset.points),
+            "num_invalid": None,
+        }
 
     def _fetch_pretrained_id(self, api_server: APIServerManager) -> str:
         """Query ``/v1/models`` and return the first model's ID.

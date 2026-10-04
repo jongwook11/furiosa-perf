@@ -34,6 +34,15 @@ from furiosa_perf.spec import Server, apply_server_overrides, load_preset, load_
     help="Benchmark preset: a YAML file, or a bundled name such as baseline/text-gen.",
 )
 @click.option(
+    "--output-dir",
+    default="results",
+    show_default=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Root of the results tree; each run goes to <kind>/<device>/<task>/<model> under it.",
+)
+@click.option("--resume", is_flag=True, help="Finish a run already in the results directory, keeping its valid points.")
+@click.option("--overwrite", is_flag=True, help="Delete a run already in the results directory and start over.")
+@click.option(
     "--reuse-server",
     is_flag=True,
     help="Benchmark a server already running on the configured port instead of launching one.",
@@ -43,9 +52,13 @@ from furiosa_perf.spec import Server, apply_server_overrides, load_preset, load_
     is_flag=True,
     help="Validate the server config and preset, print the server command and point count, then exit.",
 )
-def run(server_config: Path, preset: str, reuse_server: bool, check: bool) -> None:
+def run(
+    server_config: Path, preset: str, output_dir: Path, resume: bool, overwrite: bool, reuse_server: bool, check: bool
+) -> None:
     """Launch an API server, run benchmark scenarios, and save results."""
     setup_logger("WARNING" if check else "INFO")  # --check prints only the plan
+    if resume and overwrite:
+        raise click.UsageError("--resume and --overwrite are mutually exclusive")
     try:
         benchmark = load_preset(preset)
         server = apply_server_overrides(load_server(server_config, default_env=Path(sys.prefix)), benchmark.server)
@@ -70,7 +83,7 @@ def run(server_config: Path, preset: str, reuse_server: bool, check: bool) -> No
             f"the device indices {missing} are invalid; {num_detected} {server.hardware_type.upper()} devices are detected"
         )
 
-    runner = BenchmarkRunner(system_info, server, benchmark)
+    runner = BenchmarkRunner(system_info, server, benchmark, output_dir, resume=resume, overwrite=overwrite)
     logger.info("Benchmarking started.")
     runner.execute(reuse_server=reuse_server)
     logger.info("Benchmarking completed.")
