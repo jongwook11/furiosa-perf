@@ -61,21 +61,14 @@ def test_parallel_label_is_empty_only_for_pure_tensor_parallelism() -> None:
 
 
 def test_parse_server_normalises_keys_and_passes_the_rest_through() -> None:
-    """snake_case keys become kebab-case; unknown keys are kept for the backend; caching is off by default."""
+    """snake_case keys become kebab-case and unknown keys are kept for the backend, nothing else added."""
     server = parse_server(server_config(served_model_name="m", max_model_len=4096, parallel={"dp": 2}), ENV)
 
     assert server.devices == [0, 1]
     assert server.parallel == Parallel(tp=1, dp=2)
     assert server.env == ENV
     assert server.executable == ENV / "bin" / "furiosa-llm"
-    assert server.args == {"no-enable-prefix-caching": True, "served-model-name": "m", "max-model-len": 4096}
-
-
-def test_parse_server_keeps_an_explicit_prefix_caching_choice() -> None:
-    """Setting either prefix-caching option replaces the default instead of adding a conflicting flag."""
-    server = parse_server(server_config(**{"enable-prefix-caching": True}), ENV)
-
-    assert server.args == {"enable-prefix-caching": True}
+    assert server.args == {"served-model-name": "m", "max-model-len": 4096}
 
 
 @pytest.mark.parametrize(

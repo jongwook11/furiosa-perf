@@ -19,7 +19,7 @@ See [Benchmark Methodology](examples/BENCHMARK.md) for a detailed explanation of
 
 - **End-to-end automation** — server launch, benchmark execution, and teardown in one command
 - **Hardware monitoring** — power, temperature, utilization (NPU/GPU), host CPU/memory, and server `/metrics`, logged to CSV
-- **Multiple tasks** — `offline` (LLM text), `vl-offline` (vision-language), `reranker`, `embeddings`
+- **Presets** — bundled `baseline/text-gen`, `baseline/vision`, `baseline/embedding`, `baseline/rerank`, or your own YAML
 - **Flexible scenarios** — define token lengths and concurrency lists in a single YAML; `max_concurrency` can be a list and is auto-expanded
 
 ---
@@ -90,7 +90,7 @@ huggingface-cli login
 ```bash
 furiosa-perf run \
   --server-config examples/server/exaone4.yaml \
-  --benchmark-config examples/bench/llm_scenario.yaml
+  --preset baseline/text-gen
 ```
 
 See [`examples/script.sh`](examples/script.sh) for a complete working example.
@@ -100,9 +100,9 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 | Option | Required | Default | Description |
 |---|---|---|---|
 | `--server-config` | ✓ | — | API server config YAML (backend, model, devices, …) |
-| `--benchmark-config` | ✓ | — | Benchmark scenario config YAML |
+| `--preset` | ✓ | — | Benchmark preset: a bundled name such as `baseline/text-gen`, or a YAML file |
 | `--reuse-server` | | off | Benchmark a server already running on the configured port instead of launching one |
-| `--check` | | off | Validate both configs, print the server command and scenario count, and exit (no hardware needed) |
+| `--check` | | off | Validate the server config and preset, print the server command (preset server options applied) and point count, and exit (no hardware needed) |
 
 ---
 
@@ -132,7 +132,7 @@ devices: 0,1,2,3
 | `host` | `0.0.0.0` | Server bind address |
 | `port` | `8000` | Server port |
 
-**Every other key** is passed to `<backend> serve` as `--<key> <value>` (`true` → bare flag, `false` → omitted; snake_case keys are converted to kebab-case), for example `served-model-name`, `max-model-len` or `enable-prefix-caching`. Prefix caching is disabled unless one of `enable-prefix-caching` / `no-enable-prefix-caching` is set, because the fixed-length benchmarks compare raw inference performance. The parallel sizes are set only through `parallel`: the backends count them in different units (furiosa-llm counts tensor parallelism in PEs, 8 per RNGD).
+**Every other key** is passed to `<backend> serve` as `--<key> <value>` (`true` → bare flag, `false` → omitted; snake_case keys are converted to kebab-case), for example `served-model-name`, `max-model-len` or `enable-prefix-caching`. The parallel sizes are set only through `parallel`: the backends count them in different units (furiosa-llm counts tensor parallelism in PEs, 8 per RNGD).
 
 ```yaml
 # Two RNGDs as two independent replicas, served from a dedicated SDK environment
@@ -189,34 +189,39 @@ Furiosa AI supported models are available at [huggingface.co/furiosa-ai](https:/
 
 ---
 
-### Benchmark config (`--benchmark-config`)
+### Presets (`--preset`)
 
-Defines the benchmark name, task, and scenarios.
+A preset says what to measure: which client, which server options the measurement needs, and the points to run. Pass a bundled name or a YAML file of your own.
 
-**Example** (`examples/bench/llm_scenario.yaml`):
+| Bundled preset | Task |
+|---|---|
+| `baseline/text-gen` | Text generation, fixed ISL/OSL from 128/128 to 128k/1k |
+| `baseline/vision` | One 256x256 image plus text, the same total lengths as `text-gen` |
+| `baseline/embedding` | Embeddings, 256 to 32k input tokens |
+| `baseline/rerank` | Reranking, 5 documents per query, 256 to 8k tokens |
+
+The bundled files are in [`furiosa_perf/presets/`](furiosa_perf/presets); copy one to change the points. The format:
 
 ```yaml
-name: vllm
-task: offline
-scenarios:
-  - input_tokens: 128
-    output_tokens: 128
-    max_concurrency: [1, 4, 8, 16, 32, 64, 128, 256, 512]
-  - input_tokens: 1024
-    output_tokens: 1024
-    max_concurrency: [1, 4, 8, 16, 32, 64, 128, 256]
+kind: baseline            # fixed-length baseline sweep
+task: text-gen            # label used in result paths
+client: vllm-bench        # runs `vllm bench serve` (pinned version, own venv)
+server:                   # applied over the server config; null removes an option
+  no-enable-prefix-caching: true
+  reasoning-parser: null
+args:                     # `vllm bench serve` options shared by every point, same names as its CLI
+  backend: vllm           # request format of the client
+  dataset-name: random
+  ignore-eos: true
+matrix:                   # one point per combination; list values are expanded
+  - {random-input-len: 1024, random-output-len: 1024, max-concurrency: [1, 4, 8, 16]}
 ```
 
-`max_concurrency` can be a single integer or a list — lists are automatically expanded into separate runs.
+- `num-prompts` defaults to three times `max-concurrency` (see `examples/BENCHMARK.md`).
+- furiosa-perf sets the client's target (`model`, `host`, `port`) and result file itself; presets cannot.
+- The baseline presets turn prefix caching off (random prompts must not hit a cache) and remove any reasoning parser, so thinking tokens stay in `content`, which is what the client counts.
 
-**Supported tasks:**
-
-| `task` | Description | Required extra fields |
-|---|---|---|
-| `offline` | LLM text generation | `output_tokens`, `random_range_ratio` |
-| `vl-offline` | Vision-language generation | `output_tokens`, `random_mm_*` fields |
-| `reranker` | Reranking | `random_batch_size` |
-| `embeddings` | Text embeddings | — |
+**Point validity.** Each summary row has `ok` and `fail_reason`. A point is invalid when the client exits with an error, more than 5 % of its requests fail, a generation point counts no output tokens, or, with `ignore-eos`, fewer than 90 % of the requested output tokens come back. Invalid points keep their measured values. The run goes on after an invalid point unless the server stopped answering, in which case it stops and reports how many points were not run.
 
 ---
 
@@ -236,7 +241,8 @@ bench_space/
         └── <ISL>.<OSL>.<CONC>/
             ├── monitor.csv               # the rows of this scenario
             ├── devices.csv
-            └── vllm-*.json               # raw vLLM benchmark output
+            ├── result.json               # raw vllm bench result
+            └── bench.log                 # client console output
 ```
 
 The monitor columns merged into each scenario's summary row:
@@ -259,7 +265,7 @@ Server logs are written to `./serve_logs/`.
 **Example path:**
 
 ```
-bench_space/RNGD_4_furiosa-llm/vllm/offline/EXAONE-4.0-32B-FP8/summary.csv
+bench_space/RNGD_4_furiosa-llm_2026.4.0/vllm/text-gen/EXAONE-4.0-32B-FP8/summary.csv
 ```
 
 ---

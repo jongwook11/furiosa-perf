@@ -133,7 +133,7 @@ class APIServerManager:
                 or by another program), the backend is missing from the environment,
                 or the server exits or does not become ready in time.
         """
-        running_model = self._served_model()
+        running_model = self.served_model()
         if running_model is not None:
             return self._reuse(running_model, reuse_running)
         listener = pid_listening_on(self.server.port)
@@ -201,7 +201,7 @@ class APIServerManager:
             self._log_file.close()
             self._log_file = None
 
-    def _served_model(self) -> str | None:
+    def served_model(self) -> str | None:
         """ID of the model served on the configured port, or ``None`` if nothing answers."""
         try:
             response = requests.get(f"{self.base_url}/v1/models", timeout=HEALTH_TIMEOUT_S)
@@ -238,7 +238,7 @@ class APIServerManager:
                     f"the server exited during startup with code {self.server_process.poll()}; "
                     f"see {self._log_path}. Last lines:\n{self._log_tail()}"
                 )
-            if self._served_model() is not None:
+            if self.served_model() is not None:
                 return
             if time.time() - start > STARTUP_TIMEOUT_S:
                 raise RuntimeError(

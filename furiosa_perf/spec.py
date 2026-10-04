@@ -1,8 +1,9 @@
-"""Configuration dataclasses and loaders for API server and benchmark runs."""
+"""Read and validate the two inputs of a run: the server config and the benchmark preset."""
 
-from dataclasses import dataclass, field
+import itertools
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 import yaml
 
@@ -19,10 +20,9 @@ SERVER_FIELDS = ("backend", "model", "devices", "parallel", "env", "host", "port
 # counts tensor parallelism in PEs), and two sources for one setting can disagree.
 PARALLEL_SERVER_ARGS = ("tensor-parallel-size", "pipeline-parallel-size", "data-parallel-size")
 
-# Applied unless the config sets either option: the fixed-length baseline compares
-# raw inference performance, which prefix-cache hits on the random prompts would skew.
-DEFAULT_SERVER_ARGS: dict[str, Any] = {"no-enable-prefix-caching": True}
-PREFIX_CACHING_ARGS = ("enable-prefix-caching", "no-enable-prefix-caching")
+# Mutually exclusive flag pairs: a preset that sets one removes the other from the
+# server config instead of passing both.
+EXCLUSIVE_SERVER_ARGS = (("enable-prefix-caching", "no-enable-prefix-caching"),)
 
 
 @dataclass(frozen=True)
@@ -158,7 +158,8 @@ def parse_server(raw: dict[str, Any], default_env: Path) -> Server:
     """Build a :class:`Server` from the parsed server config.
 
     Keys may be written in snake_case or kebab-case; pass-through keys are
-    normalised to kebab-case, the form both backends' command lines use.
+    normalised to kebab-case, the form both backends' command lines use. A key set
+    to ``null`` or ``false`` is left off the command line.
 
     Args:
         raw: Mapping loaded from the server config YAML.
@@ -186,9 +187,6 @@ def parse_server(raw: dict[str, Any], default_env: Path) -> Server:
             raise ValueError(
                 f"the server option '{key}' is not allowed; set 'parallel: {{tp, pp, dp}}' in units of devices instead"
             )
-    if not any(key in args for key in PREFIX_CACHING_ARGS):
-        args = {**DEFAULT_SERVER_ARGS, **args}
-
     devices = parse_devices(config["devices"])
     return Server(
         backend=backend,
@@ -227,152 +225,176 @@ def load_server(path: Path, default_env: Path) -> Server:
     return server
 
 
-@dataclass
-class BaseScenarioConfig:
-    """Fields shared by every vLLM ``bench serve`` scenario.
+def apply_server_overrides(server: Server, overrides: dict[str, Any]) -> Server:
+    """Return ``server`` with a preset's ``server`` options applied on top.
 
-    These map onto the placeholders in ``VllmPerformanceBenchmark.COMMAND``
-    (``--max-concurrency``, ``--num-prompts``, ``--request-rate``) plus the
-    input/output token counts used for result-directory naming and parsing.
+    The preset wins: it states what its measurement needs (for example prefix
+    caching off for the fixed-length baseline). ``null`` removes an option.
+
+    Args:
+        server: Server from the server config.
+        overrides: The preset's ``server`` mapping, kebab-case keys.
+
+    Returns:
+        The server with merged pass-through options.
+
+    Raises:
+        ValueError: If an override sets parallelism, which only ``parallel`` may.
+    """
+    for key in overrides:
+        if key in PARALLEL_SERVER_ARGS:
+            raise ValueError(f"the preset server option '{key}' is not allowed; parallelism comes from the server config")
+    args = dict(server.args)
+    for pair in EXCLUSIVE_SERVER_ARGS:
+        if any(key in overrides for key in pair):
+            for key in pair:
+                args.pop(key, None)
+    args.update(overrides)
+    return replace(server, args=args)
+
+
+# Client options furiosa-perf sets itself (target server and result file).
+MANAGED_CLIENT_ARGS = ("model", "host", "port", "base-url", "save-result", "result-dir", "result-filename")
+CLIENTS = ("vllm-bench",)
+KINDS = ("baseline",)
+# Requests per point when the preset does not say: enough for every concurrent slot
+# to be refilled twice after the first wave.
+PROMPTS_PER_CONCURRENCY = 3
+
+
+@dataclass(frozen=True)
+class Preset:
+    """What to measure and with which client.
+
+    Attributes:
+        kind: Measurement type; ``baseline`` is the fixed-length sweep.
+        task: Label of what is measured (``text-gen``, ``vision``, ...), used in result paths.
+        client: Benchmark client; ``vllm-bench`` runs ``vllm bench serve``.
+        server: Server options the measurement requires, applied over the server config.
+        points: One mapping of client options per measurement point, already expanded.
     """
 
-    input_tokens: int = 1024
-    max_concurrency: int = 1
-    num_prompts: int | None = None
-    request_rate: int | str = "inf"
-    model: str = ""
-
-
-@dataclass
-class LLMScenarioConfig(BaseScenarioConfig):
-    """Scenario config for the ``offline`` task."""
-
-    random_range_ratio: float = 0.0
-    output_tokens: int = 1024
-
-    def __post_init__(self) -> None:
-        """Default num_prompts to max_concurrency × 3 when not set."""
-        if self.num_prompts is None:
-            self.num_prompts = self.max_concurrency * 3
-
-
-@dataclass
-class VLScenarioConfig(LLMScenarioConfig):
-    """Scenario config for the ``vl-offline`` (vision-language) task."""
-
-    random_range_ratio: float = 0.0
-    random_mm_base_items_per_request: int = 1
-    random_mm_bucket_config: str = "{(256, 256, 1): 1.0}"
-    random_mm_limit_mm_per_prompt: str = '{"image": 1}'
-
-
-@dataclass
-class RerankerScenarioConfig(BaseScenarioConfig):
-    """Scenario config for the ``reranker`` task."""
-
-    random_batch_size: int = 5
-
-    def __post_init__(self) -> None:
-        """Default num_prompts based on request_rate when not set."""
-        if self.num_prompts is None:
-            if isinstance(self.request_rate, (int, float)):
-                self.num_prompts = int(self.request_rate * 3)
-            else:
-                # "inf" or any non-numeric rate: fall back to a small finite run size.
-                self.num_prompts = self.max_concurrency * 3
-
-
-@dataclass
-class EmbeddingScenarioConfig(BaseScenarioConfig):
-    """Scenario config for the ``embeddings`` task."""
-
-    def __post_init__(self) -> None:
-        """Default num_prompts based on request_rate when not set."""
-        if self.num_prompts is None:
-            if isinstance(self.request_rate, (int, float)):
-                self.num_prompts = int(self.request_rate * 3)
-            else:
-                # "inf" or any non-numeric rate: fall back to a small finite run size.
-                self.num_prompts = self.max_concurrency * 3
-
-
-ScenarioConfig: TypeAlias = (
-    LLMScenarioConfig | VLScenarioConfig | RerankerScenarioConfig | EmbeddingScenarioConfig
-)
-
-
-@dataclass
-class PerformanceBenchConfig:
-    """Top-level benchmark configuration holding all scenarios to run."""
-
-    name: str
+    kind: str
     task: str
-    model: str = ""
-    device_name: str = ""
-    used_device_num: int = 1
-    parallel_label: str = ""  # Parallel.label; empty for pure tensor parallelism
-    scenarios: list[ScenarioConfig] = field(default_factory=list)
+    client: str
+    server: dict[str, Any]
+    points: list[dict[str, Any]]
 
 
-class PerformanceBenchConfigLoader:
-    """Load and construct a :class:`PerformanceBenchConfig` from a YAML file."""
+def _kebab(mapping: dict[str, Any]) -> dict[str, Any]:
+    """``mapping`` with snake_case keys rewritten to kebab-case."""
+    return {key.replace("_", "-"): value for key, value in mapping.items()}
 
-    CONFIG_REGISTRY: dict[str, type[ScenarioConfig]] = {
-        "offline": LLMScenarioConfig,
-        "vl-offline": VLScenarioConfig,
-        "reranker": RerankerScenarioConfig,
-        "embeddings": EmbeddingScenarioConfig,
-    }
 
-    @classmethod
-    def _create_config(cls, configs: dict[str, Any]) -> PerformanceBenchConfig:
-        """Parse raw YAML data into a :class:`PerformanceBenchConfig`.
+def expand_matrix(args: dict[str, Any], matrix: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand matrix rows into points: list values form a cartesian product.
 
-        Args:
-            configs: Raw YAML dict containing ``name``, ``task``, and ``scenarios``.
+    Each point is ``args`` overlaid with one combination of a row. ``num-prompts``
+    defaults to :data:`PROMPTS_PER_CONCURRENCY` times ``max-concurrency``.
 
-        Returns:
-            Fully expanded :class:`PerformanceBenchConfig` with one
-            :class:`ScenarioConfig` per concurrency level.
+    Args:
+        args: Client options shared by every point.
+        matrix: Rows of options; a list value means one point per element.
 
-        Raises:
-            ValueError: If the task name is not registered.
-        """
-        task = configs.get("task")
-        scenario_class = cls.CONFIG_REGISTRY.get(task)  # type: ignore[arg-type]
-        if scenario_class is None:
-            raise ValueError(f"No scenario config registered for task {task!r}.")
+    Returns:
+        The points in row order, combinations in the order the keys appear.
+    """
+    points = []
+    for row in matrix or [{}]:
+        row = _kebab(row)
+        keys = list(row)
+        values = [v if isinstance(v, list) else [v] for v in row.values()]
+        for combination in itertools.product(*values):
+            point = {**args, **dict(zip(keys, combination, strict=True))}
+            if "num-prompts" not in point and isinstance(point.get("max-concurrency"), int):
+                point["num-prompts"] = PROMPTS_PER_CONCURRENCY * point["max-concurrency"]
+            points.append(point)
+    return points
 
-        base = {k: v for k, v in configs.items() if k != "scenarios"}
-        expanded: list[ScenarioConfig] = []
-        for scenario in configs.get("scenarios", []):
-            concurrencies = scenario["max_concurrency"]
-            if isinstance(concurrencies, list):
-                base_fields = {k: v for k, v in scenario.items() if k != "max_concurrency"}
-                expanded.extend(scenario_class(**base_fields, max_concurrency=c) for c in concurrencies)
-            else:
-                expanded.append(scenario_class(**scenario))
 
-        return PerformanceBenchConfig(**base, scenarios=expanded)
+def parse_preset(raw: dict[str, Any]) -> Preset:
+    """Build a :class:`Preset` from the parsed preset YAML.
 
-    @classmethod
-    def benchmark_config_setup(cls, benchmark_config_path: Path) -> PerformanceBenchConfig:
-        """Load a benchmark config YAML and return the parsed config object.
+    Args:
+        raw: Mapping with ``kind``, ``task``, ``client``, and optionally ``server``,
+            ``args`` and ``matrix``.
 
-        Args:
-            benchmark_config_path: Path to the YAML configuration file.
+    Returns:
+        The validated preset.
 
-        Returns:
-            Parsed :class:`PerformanceBenchConfig` instance.
+    Raises:
+        ValueError: If a key is missing or unknown, or ``args``/``matrix`` set an
+            option furiosa-perf manages.
+    """
+    unknown = set(raw) - {"kind", "task", "client", "server", "args", "matrix"}
+    if unknown:
+        raise ValueError(f"the preset keys {sorted(unknown)} are unknown; use kind, task, client, server, args and matrix")
+    for key in ("kind", "task", "client"):
+        if not raw.get(key):
+            raise ValueError(f"the preset is missing '{key}'")
+    if raw["kind"] not in KINDS:
+        raise ValueError(f"the preset kind '{raw['kind']}' is unsupported; use one of {', '.join(KINDS)}")
+    if raw["client"] not in CLIENTS:
+        raise ValueError(f"the client '{raw['client']}' is unsupported; use one of {', '.join(CLIENTS)}")
 
-        Raises:
-            FileNotFoundError: If the config file does not exist.
-        """
-        if not benchmark_config_path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {benchmark_config_path}")
+    points = expand_matrix(_kebab(raw.get("args") or {}), raw.get("matrix") or [])
+    managed = sorted({key for point in points for key in point if key in MANAGED_CLIENT_ARGS})
+    if managed:
+        raise ValueError(f"the client options {managed} are not allowed; furiosa-perf sets them from the server config")
+    return Preset(
+        kind=str(raw["kind"]),
+        task=str(raw["task"]),
+        client=str(raw["client"]),
+        server=_kebab(raw.get("server") or {}),
+        points=points,
+    )
 
-        with benchmark_config_path.open() as f:
-            benchmark_config = cls._create_config(yaml.safe_load(f))
 
-        logger.info(f"Loaded benchmark config: {benchmark_config}")
-        return benchmark_config
+PRESETS_DIR = Path(__file__).parent / "presets"
+
+
+def resolve_preset(name_or_path: str) -> Path:
+    """Find a preset file: a path, or a name of a bundled preset such as ``baseline/text-gen``.
+
+    Args:
+        name_or_path: File path, or a name relative to the bundled presets directory.
+
+    Returns:
+        Path of the preset file.
+
+    Raises:
+        ValueError: If neither exists.
+    """
+    path = Path(name_or_path).expanduser()
+    if path.is_file():
+        return path
+    bundled = PRESETS_DIR / f"{name_or_path}.yaml"
+    if bundled.is_file():
+        return bundled
+    available = sorted(str(p.relative_to(PRESETS_DIR).with_suffix("")) for p in PRESETS_DIR.rglob("*.yaml"))
+    raise ValueError(f"the preset '{name_or_path}' does not exist; give a file path or one of {', '.join(available)}")
+
+
+def load_preset(name_or_path: str) -> Preset:
+    """Load and validate a preset by path or bundled name.
+
+    Args:
+        name_or_path: See :func:`resolve_preset`.
+
+    Returns:
+        The validated preset.
+
+    Raises:
+        ValueError: If the preset cannot be found or is invalid.
+    """
+    path = resolve_preset(name_or_path)
+    with path.open() as f:
+        raw = yaml.safe_load(f)
+    if not isinstance(raw, dict):
+        raise ValueError(f"the preset {path} should be a mapping")
+    try:
+        preset = parse_preset(raw)
+    except ValueError as e:
+        raise ValueError(f"{path}: {e}") from None
+    logger.info(f"Loaded preset {path}: {preset.kind}/{preset.task}, {len(preset.points)} points")
+    return preset

@@ -1,6 +1,5 @@
 """Benchmark orchestration: server -> monitor -> benchmark client -> teardown."""
 
-import os
 import signal
 from typing import Any
 
@@ -10,7 +9,7 @@ from furiosa_perf.clients.vllm_bench import VllmPerformanceBenchmark
 from furiosa_perf.log import logger
 from furiosa_perf.runner.monitor import HardwareMonitor, MonitorConfig
 from furiosa_perf.runner.server import APIServerManager
-from furiosa_perf.spec import PerformanceBenchConfig, Server
+from furiosa_perf.spec import Preset, Server
 
 
 class BenchmarkRunner:
@@ -20,17 +19,17 @@ class BenchmarkRunner:
     instances and coordinates their startup, monitoring, and cleanup.
     """
 
-    def __init__(self, system_info: Any, server: Server, benchmark_config: PerformanceBenchConfig) -> None:
+    def __init__(self, system_info: Any, server: Server, preset: Preset) -> None:
         """Store configuration for later use in :meth:`execute`.
 
         Args:
             system_info: :class:`SystemDetector.SystemEnv` namedtuple with OS/HW info.
-            server: What API server to launch.
-            benchmark_config: Parsed benchmark config dataclass with scenarios.
+            server: What API server to launch, with the preset's server options applied.
+            preset: What to measure.
         """
         self.system_info = system_info
         self.server = server
-        self.benchmark_config = benchmark_config
+        self.preset = preset
 
     def execute(self, reuse_server: bool = False) -> list[Any]:
         """Run the full benchmark pipeline and return per-scenario results.
@@ -66,15 +65,15 @@ class BenchmarkRunner:
                 f"* API Server Command: {server_command}"
             )
 
-            pretrained_id = self._fetch_pretrained_id(api_server)
-            self._configure_benchmark(pretrained_id)
-
             benchmark = VllmPerformanceBenchmark(
-                config=self.benchmark_config,
+                preset=self.preset,
+                model=self._fetch_pretrained_id(api_server),
+                device_name=self.system_info.hardware[self.server.hardware_type]["name"],
+                used_device_num=len(self.server.devices),
+                parallel_label=self.server.parallel.label,
                 backend=self.system_info.runtime,
                 host=self.server.host,
                 port=self.server.port,
-                env=os.environ.copy(),
             )
             benchmark.setup()
 
@@ -89,7 +88,7 @@ class BenchmarkRunner:
                 )
             )
             monitor.start()
-            benchmark.run(monitor)
+            benchmark.run(monitor, server_alive=lambda: api_server.served_model() is not None)
 
         except Exception:
             logger.exception("Benchmark execution failed.")
@@ -118,17 +117,6 @@ class BenchmarkRunner:
         resp = requests.get(f"{api_server.base_url}/v1/models", timeout=5)
         resp.raise_for_status()
         return resp.json()["data"][0]["id"]  # type: ignore[no-any-return]
-
-    def _configure_benchmark(self, pretrained_id: str) -> None:
-        """Populate benchmark_config fields resolved at runtime.
-
-        Args:
-            pretrained_id: Model ID returned by the running API server.
-        """
-        self.benchmark_config.model = pretrained_id
-        self.benchmark_config.device_name = self.system_info.hardware[self.server.hardware_type]["name"]
-        self.benchmark_config.used_device_num = len(self.server.devices)
-        self.benchmark_config.parallel_label = self.server.parallel.label
 
     def _cleanup(
         self,

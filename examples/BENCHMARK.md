@@ -8,15 +8,15 @@ This document explains how `furiosa-perf` measures LLM serving performance, why 
 
 `furiosa-perf` uses the [vLLM benchmark tool](https://github.com/vllm-project/vllm/tree/main/benchmarks) (`vllm bench serve`) to track serving performance across a fixed matrix of scenarios defined by:
 
-- **Input token length** (`input_tokens`) — the length of each prompt
-- **Output token length** (`output_tokens`) — the number of tokens to generate
-- **Max concurrency** (`max_concurrency`) — the number of requests processed simultaneously, treated as the effective batch size (i.e. concurrent users)
+- **Input token length** (`random-input-len`) — the length of each prompt
+- **Output token length** (`random-output-len`) — the number of tokens to generate
+- **Max concurrency** (`max-concurrency`) — the number of requests processed simultaneously, treated as the effective batch size (i.e. concurrent users)
 
 Benchmarking against this fixed scenario matrix allows performance to be tracked consistently across hardware, firmware, and software versions.
 
 ### Isolated venv for the benchmark client
 
-The vLLM benchmark tool is installed into an isolated Python venv managed automatically by `furiosa-perf` (under `bench_space/.<name>/`, e.g. `bench_space/.vllm/`). This avoids dependency conflicts between the benchmark client and the `furiosa-llm` serving environment, so no manual setup is needed.
+The vLLM benchmark tool is installed on first use into its own Python venv, pinned to one vLLM version (`~/.cache/furiosa-perf/clients/vllm-<version>/`, shared by all runs on the host). This avoids dependency conflicts with the serving environment and keeps the client identical across hosts and dates, so results stay comparable. The version is printed in the summary header.
 
 ---
 
@@ -24,59 +24,23 @@ The vLLM benchmark tool is installed into an isolated Python venv managed automa
 
 ### Workload construction
 
-`furiosa-perf` invokes the vLLM benchmark tool via a **two-part command**: a shared base command applied to every scenario, followed by task-specific flags that vary by `task` type.
-
-**Base command** (all tasks):
+Each point of a preset becomes one `vllm bench serve` call: the preset's shared `args`, overlaid with the point's matrix values, plus the target and result file that `furiosa-perf` sets itself. For a `baseline/text-gen` point:
 
 ```bash
 python -m vllm.entrypoints.cli.main bench serve \
-  --percentile-metrics=ttft,tpot,itl,e2el \
-  --metric-percentiles=25,50,75,90,95,99 \
-  --max-concurrency=<max_concurrency> \
-  --num-prompts=<num_prompts> \
-  --request-rate=<request_rate> \
-  --model=<model> \
-  --ignore-eos \
-  --save-result \
-  --result-dir=<result_dir> \
-  --ready-check-timeout-sec=0 \
-  --trust-remote-code \
-  [--host=<host>] [--port=<port>]
+  --model <served model> --host <host> --port <port> \
+  --save-result --result-dir <point dir> --result-filename result.json \
+  --ready-check-timeout-sec 0 \
+  --backend vllm --dataset-name random --random-range-ratio 0 \
+  --ignore-eos --temperature 0 --trust-remote-code \
+  --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 25,50,75,90,95,99 \
+  --random-input-len <ISL> --random-output-len <OSL> \
+  --max-concurrency <C> --num-prompts <3 x C>
 ```
 
-**Task-specific flags** (appended to the base command):
+The other bundled presets differ only in their `args` (see `furiosa_perf/presets/baseline/`): `vision` sends one random 256x256 image per request through `/v1/chat/completions`, `embedding` and `rerank` use the pooling endpoints and have no output length.
 
-| Task | Additional flags |
-|---|---|
-| `offline` | `--backend=vllm --dataset-name=random --random-input-len=<ISL> --random-output-len=<OSL> --random-range-ratio=<ratio>` |
-| `vl-offline` | `--backend=openai-chat --dataset-name=random-mm --random-input-len=<ISL> --random-output-len=<OSL> --random-range-ratio=<ratio> --random-mm-base-items-per-request=<N> --random-mm-bucket-config=<cfg> --random-mm-limit-mm-per-prompt=<cfg> --endpoint=/v1/chat/completions` |
-| `reranker` | `--backend=vllm-rerank --dataset-name=random-rerank --random-input-len=<ISL> --random-batch-size=<N> --endpoint=/v1/rerank` |
-| `embeddings` | `--backend=openai-embeddings --dataset-name=random --random-input-len=<ISL> --endpoint=/v1/embeddings` |
-
-For example, a full `offline` scenario run looks like:
-
-```bash
-python -m vllm.entrypoints.cli.main bench serve \
-  --percentile-metrics=ttft,tpot,itl,e2el \
-  --metric-percentiles=25,50,75,90,95,99 \
-  --max-concurrency=<max_concurrency> \
-  --num-prompts=<max_concurrency * 3> \
-  --request-rate=inf \
-  --model=<model> \
-  --ignore-eos \
-  --save-result \
-  --result-dir=<result_dir> \
-  --ready-check-timeout-sec=0 \
-  --trust-remote-code \
-  --backend=vllm \
-  --dataset-name=random \
-  --random-input-len=<input_tokens> \
-  --random-output-len=<output_tokens> \
-  --random-range-ratio=0.0 \
-  --port=<port>
-```
-
-### Why `num_prompts = max_concurrency × 3`
+### Why `num-prompts = max-concurrency × 3`
 
 Setting `--num-prompts` to three times `--max-concurrency` (with `--request-rate inf`) creates a two-phase load pattern:
 
@@ -118,24 +82,14 @@ From TTFT, TPOT, and Output Throughput you can derive the per-user experience at
 
 ## Scenario examples
 
-The `examples/bench/llm_scenario.yaml` covers a wide range of input lengths at varying concurrency to characterise both short-context and long-context performance:
+The `baseline/text-gen` preset covers a wide range of input lengths at varying concurrency to characterise both short-context and long-context performance (excerpt):
 
 ```yaml
-name: vllm
-task: offline
-scenarios:
-  - input_tokens: 128
-    output_tokens: 128
-    max_concurrency: [1, 4, 8, 16, 32, 64, 128, 256, 512]
-  - input_tokens: 1024
-    output_tokens: 1024
-    max_concurrency: [1, 4, 8, 16, 32, 64, 128, 256]
-  - input_tokens: 7168
-    output_tokens: 1024
-    max_concurrency: [1, 4, 8, 16, 32, 64]
-  - input_tokens: 130048
-    output_tokens: 1024
-    max_concurrency: [1, 4]
+matrix:
+  - {random-input-len: 128, random-output-len: 128, max-concurrency: [1, 4, 8, 16, 32, 64, 128, 256, 512]}
+  - {random-input-len: 1024, random-output-len: 1024, max-concurrency: [1, 4, 8, 16, 32, 64, 128, 256]}
+  - {random-input-len: 7168, random-output-len: 1024, max-concurrency: [1, 4, 8, 16, 32, 64]}
+  - {random-input-len: 130048, random-output-len: 1024, max-concurrency: [1, 4]}
 ```
 
 Short-context scenarios (128 tokens in/out) sweep a wider concurrency range to find the throughput ceiling. Long-context scenarios (e.g. 130 k input) cap concurrency lower because each request occupies significantly more KV-cache.

@@ -18,7 +18,7 @@ from furiosa_perf.reporting.command import report  # noqa: E402
 from furiosa_perf.runner.env import SystemDetector  # noqa: E402
 from furiosa_perf.runner.runner import BenchmarkRunner  # noqa: E402
 from furiosa_perf.runner.server import server_command  # noqa: E402
-from furiosa_perf.spec import PerformanceBenchConfigLoader, Server, load_server  # noqa: E402
+from furiosa_perf.spec import Server, apply_server_overrides, load_preset, load_server  # noqa: E402
 
 
 @click.command()
@@ -29,10 +29,9 @@ from furiosa_perf.spec import PerformanceBenchConfigLoader, Server, load_server 
     help="API server config (YAML): backend, model, devices, env, and options passed to `<backend> serve`.",
 )
 @click.option(
-    "--benchmark-config",
+    "--preset",
     required=True,
-    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
-    help="Benchmark scenario configuration file (YAML).",
+    help="Benchmark preset: a YAML file, or a bundled name such as baseline/text-gen.",
 )
 @click.option(
     "--reuse-server",
@@ -42,19 +41,19 @@ from furiosa_perf.spec import PerformanceBenchConfigLoader, Server, load_server 
 @click.option(
     "--check",
     is_flag=True,
-    help="Validate both configs and print the server command and scenario count, then exit without running.",
+    help="Validate the server config and preset, print the server command and point count, then exit.",
 )
-def run(server_config: Path, benchmark_config: Path, reuse_server: bool, check: bool) -> None:
+def run(server_config: Path, preset: str, reuse_server: bool, check: bool) -> None:
     """Launch an API server, run benchmark scenarios, and save results."""
     setup_logger("WARNING" if check else "INFO")  # --check prints only the plan
     try:
-        server = load_server(server_config, default_env=Path(sys.prefix))
-        benchmark = PerformanceBenchConfigLoader.benchmark_config_setup(benchmark_config)
+        benchmark = load_preset(preset)
+        server = apply_server_overrides(load_server(server_config, default_env=Path(sys.prefix)), benchmark.server)
     except ValueError as e:
         raise click.UsageError(str(e)) from None
 
     if check:
-        _print_check(server, len(benchmark.scenarios))
+        _print_check(server, len(benchmark.points))
         return
 
     logger.info(f"Starting furiosa-perf: {server.backend} serving {server.model} on devices {server.devices}")
@@ -77,13 +76,13 @@ def run(server_config: Path, benchmark_config: Path, reuse_server: bool, check: 
     logger.info("Benchmarking completed.")
 
 
-def _print_check(server: Server, num_scenarios: int) -> None:
+def _print_check(server: Server, num_points: int) -> None:
     """Print what ``run`` would launch, for validating configs in scripts and CI."""
     argv, env = server_command(server)
     if "CUDA_VISIBLE_DEVICES" in env:
         click.echo(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']} \\")
     click.echo(shlex.join(argv))
-    click.echo(f"{num_scenarios} scenarios")
+    click.echo(f"{num_points} points")
     if not server.executable.exists():
         click.echo(f"warning: {server.executable} does not exist on this host", err=True)
 

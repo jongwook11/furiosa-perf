@@ -1,10 +1,17 @@
-"""vLLM-based performance benchmark implementation."""
+"""Run a preset's points with ``vllm bench serve`` and summarize them.
 
+The client lives in its own virtual environment, pinned to
+:data:`VLLM_BENCH_VERSION` so that results from different hosts and dates come
+from the same client. Each point writes the client's result JSON next to its
+log; the summary is built from that JSON, never from the console output.
+"""
+
+import json
 import os
 import signal
 import subprocess
 from collections import defaultdict
-from dataclasses import asdict
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,240 +20,202 @@ from pytablewriter import MarkdownTableWriter
 
 from furiosa_perf.log import logger
 from furiosa_perf.runner.monitor import HardwareMonitor
-from furiosa_perf.spec import PerformanceBenchConfig, ScenarioConfig
+from furiosa_perf.runner.server import option_args
+from furiosa_perf.spec import Preset
 
+VLLM_BENCH_VERSION = "0.30.0"
+CLIENT_PYTHON = "3.12"
 WORKSPACE = "./bench_space"
+RESULT_GROUP = "vllm"  # directory level between device and task, kept from the earlier layout
+RESULT_FILE = "result.json"
+BENCH_LOG = "bench.log"
+
+# A point is not trusted when more requests than this fraction failed.
+MAX_FAILED_FRACTION = 0.05
+# With ignore-eos every request must return exactly the requested output length;
+# fewer tokens than this fraction of it means the client did not count them all.
+MIN_OUTPUT_FRACTION = 0.9
+
+# Statistics read from the result JSON for each latency metric.
+LATENCY_STATS = ("mean", "median", "p25", "p50", "p75", "p90", "p95", "p99")
+# result JSON metric -> (summary column suffix, divisor from ms, digits). The units match
+# the earlier summary files, which the report reads.
+LATENCY_COLUMNS = {"ttft": ("TTFT(s)", 1000.0, 4), "tpot": ("TPOT(ms)", 1.0, 3), "e2el": ("E2EL(s)", 1000.0, 4)}
+
+
+def client_dir() -> Path:
+    """Directory of the pinned client environment (shared by runs on this host)."""
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return cache / "furiosa-perf" / "clients" / f"vllm-{VLLM_BENCH_VERSION}"
+
+
+def ensure_client() -> Path:
+    """Create the client environment on first use and return its interpreter.
+
+    Returns:
+        Path of the environment's ``python``.
+
+    Raises:
+        RuntimeError: If creating the environment or installing vLLM fails.
+    """
+    env = client_dir()
+    python = env / "bin" / "python"
+    if (env / "bin" / "vllm").exists():
+        return python
+    logger.info(f"Installing the benchmark client vllm=={VLLM_BENCH_VERSION} into {env}")
+    for step in (
+        ["uv", "venv", "--python", CLIENT_PYTHON, str(env)],
+        ["uv", "pip", "install", "--python", str(python), f"vllm=={VLLM_BENCH_VERSION}"],
+    ):
+        done = subprocess.run(step, capture_output=True, text=True)
+        if done.returncode != 0:
+            raise RuntimeError(
+                f"failed to set up the benchmark client ({' '.join(step)}); cause: {done.stderr.strip()}"
+            )
+    return python
+
+
+def point_name(point: dict[str, Any]) -> str:
+    """Directory name of a point: ``<isl>.<osl>.<conc>``, ``<isl>.b<docs>.<conc>`` or ``<isl>.<conc>``."""
+    parts = [str(point.get("random-input-len"))]
+    if point.get("random-output-len"):
+        parts.append(str(point["random-output-len"]))
+    elif "random-batch-size" in point:
+        parts.append(f"b{point['random-batch-size']}")
+    parts.append(str(point.get("max-concurrency")))
+    return ".".join(parts)
+
+
+def judge(point: dict[str, Any], result: dict[str, Any] | None, returncode: int) -> str:
+    """Decide whether a point's numbers can be trusted.
+
+    Args:
+        point: Client options of the point.
+        result: The client's result JSON, ``None`` if it wrote none.
+        returncode: The client's exit code.
+
+    Returns:
+        ``""`` if the point is valid, otherwise the reason it is not.
+    """
+    if returncode != 0 or result is None:
+        return f"client exited with code {returncode}" + ("" if result is not None else " without a result file")
+    requested = int(result.get("num_prompts") or point.get("num-prompts") or 0)
+    failed = int(result.get("failed") or 0)
+    if requested and failed / requested > MAX_FAILED_FRACTION:
+        return f"{failed} of {requested} requests failed"
+
+    output_len = int(point.get("random-output-len") or 0)
+    if output_len <= 0:
+        return ""
+    produced = int(result.get("total_output_tokens") or 0)
+    if produced == 0:
+        return "no output tokens counted"
+    expected = int(result.get("completed") or 0) * output_len
+    if point.get("ignore-eos") and produced < MIN_OUTPUT_FRACTION * expected:
+        return f"outputs shorter than requested ({produced} of {expected} tokens)"
+    return ""
+
+
+def summary_row(point: dict[str, Any], result: dict[str, Any] | None, fail_reason: str) -> dict[str, Any]:
+    """One summary row: the point's identity, its validity and the client's metrics.
+
+    Column names and units are those of the earlier summary files, which the report
+    reads. Metrics are kept as measured even when the point is invalid; ``ok`` and
+    ``fail_reason`` say whether to trust them.
+
+    Args:
+        point: Client options of the point.
+        result: The client's result JSON, ``None`` if it wrote none.
+        fail_reason: Output of :func:`judge`.
+
+    Returns:
+        The row, with the same keys for every point.
+    """
+    result = result or {}
+
+    def number(key: str, divisor: float = 1.0, digits: int = 2) -> float | None:
+        value = result.get(key)
+        return None if value is None else round(float(value) / divisor, digits)
+
+    row: dict[str, Any] = {
+        "Input Tokens": point.get("random-input-len"),
+        "Output Tokens": point.get("random-output-len") or 0,
+        "Concurrent": point.get("max-concurrency"),
+        "ok": not fail_reason,
+        "fail_reason": fail_reason,
+        "completed": result.get("completed"),
+        "failed": result.get("failed"),
+        "Output Throughput(tok/s)": number("output_throughput"),
+        "Total Throughput(tok/s)": number("total_token_throughput"),
+        "Request Throughput(req/s)": number("request_throughput", digits=3),
+    }
+    for metric, (suffix, divisor, digits) in LATENCY_COLUMNS.items():
+        for stat in LATENCY_STATS:
+            row[f"{stat.title()} {suffix}"] = number(f"{stat}_{metric}_ms", divisor, digits)
+    return row
 
 
 class VllmPerformanceBenchmark:
-    """Run vLLM benchmark scenarios against a running API server.
-
-    Manages an isolated Python venv for the benchmark tool, drives one
-    ``vllm bench serve`` subprocess per scenario, parses the output, and
-    writes Markdown/CSV summary files.
-    """
-
-    ENV: dict[str, Any] = {
-        "SETUP_COMMANDS": [
-            ("create_venv", ["uv", "venv", "--python", "3.12", "{venv_dir}"]),
-            ("install_package", ["uv", "pip", "install", "--python", "{python_exe}", "vllm"]),
-        ],
-    }
-
-    COMMAND: list[str] = [
-        "{exe}",
-        "-m",
-        "vllm.entrypoints.cli.main",
-        "bench",
-        "serve",
-        "--percentile-metrics=ttft,tpot,itl,e2el",
-        "--metric-percentiles=25,50,75,90,95,99",
-        "--max-concurrency={max_concurrency}",
-        "--num-prompts={num_prompts}",
-        "--request-rate={request_rate}",
-        "--model={model}",
-        "--ignore-eos",
-        "--save-result",
-        "--result-dir={result_dir}",
-        "--ready-check-timeout-sec=0",
-        "--trust-remote-code",
-        "--temperature=0",
-    ]
-
-    VLLM_COMMANDS: dict[str, list[str]] = {
-        "offline": [
-            "--backend=vllm",
-            "--dataset-name=random",
-            "--random-input-len={input_tokens}",
-            "--random-output-len={output_tokens}",
-            "--random-range-ratio={random_range_ratio}",
-        ],
-        "vl-offline": [
-            "--backend=openai-chat",
-            "--dataset-name=random-mm",
-            "--random-input-len={input_tokens}",
-            "--random-output-len={output_tokens}",
-            "--random-range-ratio={random_range_ratio}",
-            "--random-mm-base-items-per-request={random_mm_base_items_per_request}",
-            "--random-mm-bucket-config={random_mm_bucket_config}",
-            "--random-mm-limit-mm-per-prompt={random_mm_limit_mm_per_prompt}",
-            "--endpoint=/v1/chat/completions",
-        ],
-        "reranker": [
-            "--backend=vllm-rerank",
-            "--dataset-name=random-rerank",
-            "--random-input-len={input_tokens}",
-            "--random-batch-size={random_batch_size}",
-            "--endpoint=/v1/rerank",
-        ],
-        "embeddings": [
-            "--backend=openai-embeddings",
-            "--dataset-name=random",
-            "--random-input-len={input_tokens}",
-            "--endpoint=/v1/embeddings",
-        ],
-    }
+    """Run every point of a preset against a running API server."""
 
     def __init__(
         self,
-        config: PerformanceBenchConfig,
+        preset: Preset,
+        model: str,
+        device_name: str,
+        used_device_num: int,
+        parallel_label: str,
         backend: str,
-        host: str | None = None,
-        port: int | None = None,
-        env: dict[str, Any] | None = None,
+        host: str,
+        port: int,
     ) -> None:
-        """Initialise benchmark paths, commands, and environment.
+        """Store what to run and where results go.
 
         Args:
-            config: Benchmark configuration (name, task, scenarios, …).
-            backend: Serving framework name used in result-directory paths.
-            host: API server hostname (forwarded to the benchmark command).
-            port: API server port (forwarded to the benchmark command).
-            env: Environment variables passed to the benchmark subprocess
-                (must include ``HF_TOKEN`` if model download is needed).
+            preset: Points and task of the benchmark.
+            model: Model ID the server reports on ``/v1/models``.
+            device_name: Accelerator name, used in result paths.
+            used_device_num: Number of devices the server uses.
+            parallel_label: :attr:`furiosa_perf.spec.Parallel.label`.
+            backend: ``<backend>_<version>`` of the server, used in result paths.
+            host: API server host.
+            port: API server port.
         """
-        self.name = config.name
-        self.model = config.model
-        self.device_name = config.device_name
-        self.used_device_num = config.used_device_num
-        self.parallel_label = config.parallel_label
-        self.task = config.task
-        self.scenarios = config.scenarios
+        self.preset = preset
+        self.task = preset.task
+        self.model = model
+        self.device_name = device_name
+        self.used_device_num = used_device_num
+        self.parallel_label = parallel_label
         self.backend = backend
-        self.total_results: dict[str, Any] = {}
         self.host = host
         self.port = port
+        self.python: Path | None = None
         self.bench_process: subprocess.Popen[str] | None = None
-        self.env: dict[str, Any] = env or {}
-
-        self.base_dir = self.get_base_dir()
-        self.venv_dir = self.base_dir / f".{self.name}"
-        self.python_exe = (self.venv_dir / "bin" / "python").absolute()
-
-        self.SETUP_COMMANDS = self._build_setup_commands()
-        self.BASE_COMMAND = [arg.replace("{exe}", str(self.python_exe)) for arg in self.COMMAND]
-        self.log_init()
-
-    def log_init(self) -> None:
-        """Log resolved paths at startup for traceability."""
-        logger.info(f"base_dir={self.base_dir}")
-        logger.info(f"venv_dir={self.venv_dir}")
-        logger.info(f"python_exe={self.python_exe}")
-        logger.info("=" * 100)
-
-    def _build_setup_commands(self) -> list[tuple[str, list[str]]]:
-        """Expand format placeholders in ENV setup commands.
-
-        Returns:
-            A list of ``(step_name, command_argv)`` tuples ready to execute.
-        """
-        fmt = {
-            "python_exe": self.python_exe,
-            "venv_dir": str(self.venv_dir),
-        }
-        return [
-            (key, [arg.format(**fmt) for arg in arg_list])
-            for key, arg_list in self.ENV["SETUP_COMMANDS"]
-        ]
-
-    def start_info(self) -> None:
-        """Log a human-readable summary of what is about to run."""
-        logger.info(
-            f"Starting performance test — {self.name} + {self.task} | "
-            f"Model: {self.model} | "
-            f"Device: {self.device_name} x {self.used_device_num}"
-        )
+        self.total_results: dict[str, Any] = {"results": []}
+        self.base_dir = Path(WORKSPACE)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def setup(self) -> None:
-        """Create the venv and install the benchmark tool inside it."""
-        logger.info(f"Setting up {self.name} benchmark environment…")
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        self._execute_setup_commands()
-        logger.info(f"{self.name} setup completed successfully.")
+        """Make sure the pinned client environment exists."""
+        self.python = ensure_client()
+        logger.info(f"Benchmark client: vllm {VLLM_BENCH_VERSION} ({self.python})")
 
-    def _execute_setup_commands(self) -> None:
-        """Run each setup step sequentially, raising on failure."""
-        for step_name, command in self.SETUP_COMMANDS:
-            logger.info(f"Setup step: {step_name}")
-            if step_name == "create_venv" and self.venv_dir.exists():
-                logger.info(f"Skipping {step_name} — venv already exists at {self.venv_dir}.")
-                continue
-            if step_name == "install_package" and (self.venv_dir / "bin" / "vllm").exists():
-                logger.info(f"Skipping {step_name} — vllm already installed at {self.venv_dir}.")
-                continue
-            p = subprocess.run(command, capture_output=True, text=True)
-            if p.returncode != 0:
-                raise RuntimeError(f"Setup step {step_name!r} failed: {p.stderr}")
+    def run(self, monitor: HardwareMonitor | None = None, server_alive: Callable[[], bool] | None = None) -> None:
+        """Run all points in order and collect their summary rows.
 
-    @staticmethod
-    def _scenario_output_tokens(scenario: ScenarioConfig) -> int:
-        """Output-token count for a scenario, or ``0`` for tasks that don't generate.
-
-        ``reranker`` and ``embeddings`` produce no output tokens, so their scenario
-        configs omit the field entirely; treat those as ``0``.
-        """
-        return getattr(scenario, "output_tokens", 0)
-
-    def _scenario_result_name(self, scenario: ScenarioConfig) -> str:
-        """Unique per-scenario result sub-directory name.
-
-        The generative tasks vary output length, reranker varies batch size, and
-        embeddings vary neither — so the middle component is task-dependent to keep
-        every scenario's directory (and monitoring log) distinct:
-
-        * ``offline`` / ``vl-offline`` → ``"<isl>.<osl>.<concurrency>"``
-        * ``reranker`` → ``"<isl>.b<batch>.<concurrency>"``
-        * ``embeddings`` → ``"<isl>.<concurrency>"``
-        """
-        parts = [str(scenario.input_tokens)]
-        if hasattr(scenario, "output_tokens"):
-            parts.append(str(scenario.output_tokens))
-        elif hasattr(scenario, "random_batch_size"):
-            parts.append(f"b{scenario.random_batch_size}")
-        parts.append(str(scenario.max_concurrency))
-        return ".".join(parts)
-
-    def _get_format_args(self, scenario: ScenarioConfig) -> dict[str, Any]:
-        """Build the format-arg dict for filling command placeholders.
+        An invalid point does not stop the run. If the server is found dead after
+        one, the run stops, because every later point would fail as well.
 
         Args:
-            scenario: The scenario whose fields are merged into the dict.
+            monitor: Running hardware monitor; each point is bracketed with
+                :meth:`HardwareMonitor.begin` / :meth:`HardwareMonitor.end`.
+            server_alive: Returns whether the server still answers; checked after an
+                invalid point.
 
-        Returns:
-            A dict suitable for ``str.format(**args)`` on command templates.
+        Raises:
+            RuntimeError: If the server stopped during the run.
         """
-        return {
-            **asdict(scenario),
-            "model": self.model,
-            "result_dir": self.get_vllm_result_dir(self._scenario_result_name(scenario)),
-        }
-
-    def _get_command_for_scenario(self, scenario: ScenarioConfig) -> list[str]:
-        """Build the full benchmark argv for a single scenario.
-
-        Args:
-            scenario: Scenario whose parameters are embedded in the command.
-
-        Returns:
-            List of strings ready to pass to :class:`subprocess.Popen`.
-        """
-        fmt = self._get_format_args(scenario)
-        command = [arg.format(**fmt) for arg in (self.BASE_COMMAND + self.VLLM_COMMANDS[self.task])]
-        if self.host:
-            command.append(f"--host={self.host}")
-        if self.port:
-            command.append(f"--port={self.port}")
-        return command
-
-    def run(self, monitor: HardwareMonitor | None = None) -> None:
-        """Run all scenarios sequentially and store results in :attr:`total_results`.
-
-        Args:
-            monitor: Running hardware monitor; each scenario is bracketed with
-                :meth:`HardwareMonitor.begin` / :meth:`HardwareMonitor.end` and its
-                summary is merged into the scenario result.
-        """
-        cwd: Path = self.base_dir.resolve()
         self.total_results = {
             "model": self.model,
             "task": self.task,
@@ -254,229 +223,132 @@ class VllmPerformanceBenchmark:
             "used_device_num": self.used_device_num,
             "results": [],
         }
-        for scenario in self.scenarios:
-            self.total_results["results"].append(self._run_scenario(scenario, cwd, monitor))
+        points = self.preset.points
+        for index, point in enumerate(points):
+            row = self._run_point(point, monitor)
+            self.total_results["results"].append(row)
+            if row["ok"]:
+                continue
+            logger.warning(f"point {point_name(point)} is invalid: {row['fail_reason']}")
+            if server_alive is not None and not server_alive():
+                raise RuntimeError(
+                    f"the server stopped answering during point {point_name(point)}; "
+                    f"{len(points) - index - 1} remaining points were not run"
+                )
 
-        assert len(self.total_results["results"]) > 0, "No results collected from benchmarks"
-        logger.info(f"Total results collected: {len(self.total_results['results'])}")
+        num_invalid = sum(not row["ok"] for row in self.total_results["results"])
+        logger.info(f"{len(points)} points run, {num_invalid} invalid")
 
-    def _run_scenario(
-        self, scenario: ScenarioConfig, cwd: Path, monitor: HardwareMonitor | None = None
-    ) -> dict[str, Any]:
-        """Execute one benchmark scenario and return the parsed result dict.
+    def _command(self, point: dict[str, Any], result_dir: Path) -> list[str]:
+        """``vllm bench serve`` command line for one point."""
+        command = [str(self.python), "-m", "vllm.entrypoints.cli.main", "bench", "serve"]
+        command += ["--model", self.model, "--host", self.host, "--port", str(self.port)]
+        # The server was already checked to be ready, so the client need not wait for it.
+        command += ["--save-result", "--result-dir", str(result_dir), "--result-filename", RESULT_FILE]
+        command += ["--ready-check-timeout-sec", "0"]
+        for key, value in point.items():
+            command += option_args(key, value)
+        return command
 
-        Args:
-            scenario: Scenario configuration to run.
-            cwd: Working directory for the benchmark subprocess.
-            monitor: Hardware monitor that summarizes the scenario window, if any.
+    def _run_point(self, point: dict[str, Any], monitor: HardwareMonitor | None) -> dict[str, Any]:
+        """Run one point and return its summary row (plus monitor fields)."""
+        name = point_name(point)
+        result_dir = self.get_vllm_result_dir(name)
+        result_path = result_dir / RESULT_FILE
+        result_path.unlink(missing_ok=True)  # never read a previous run's result
+        command = self._command(point, result_dir)
+        logger.info(f"Executing: {' '.join(command)}")
 
-        Returns:
-            Dict containing parsed metrics and hardware power summary.
-
-        Raises:
-            RuntimeError: If the benchmark subprocess exits with a non-zero code.
-        """
-        command = self._get_command_for_scenario(scenario)
-        logger.info(f"Executing: {' '.join(command)} | cwd: {cwd}")
-
-        result_name = self._scenario_result_name(scenario)
-        window = monitor.begin(result_name) if monitor is not None else None
-        env = os.environ.copy()
-        if hf_token := self.env.get("HF_TOKEN"):
-             env["HF_TOKEN"] = hf_token
-        self.bench_process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            cwd=cwd,
-            bufsize=1,
-            start_new_session=True,
-            env=env,
-        )
-
-        output_lines: list[str] = []
-        if self.bench_process.stdout is not None:
-            for line in self.bench_process.stdout:
-                logger.info(line.strip())
-                output_lines.append(line)
-
-        self.bench_process.wait()
-        if self.bench_process.returncode != 0:
-            raise RuntimeError(
-                f"Benchmark failed — subprocess exited with code {self.bench_process.returncode}"
+        window = monitor.begin(name) if monitor is not None else None
+        with (result_dir / BENCH_LOG).open("w") as log:
+            self.bench_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=self.base_dir.resolve(),
+                bufsize=1,
+                start_new_session=True,
             )
+            assert self.bench_process.stdout is not None, "stdout should be a pipe"
+            for line in self.bench_process.stdout:
+                log.write(line)
+                logger.info(line.rstrip())
+            returncode = self.bench_process.wait()
         self.bench_process = None
 
-        result = self._parse_results("".join(output_lines), scenario)
+        result = None
+        if result_path.exists():
+            result = json.loads(result_path.read_text())
+        row = summary_row(point, result, judge(point, result, returncode))
         if monitor is not None and window is not None:
-            result.update(
-                monitor.end(window, scenario.max_concurrency, slice_dir=self.get_vllm_result_dir(result_name))
-            )
-        logger.info(f"Parsed result: {result}")
-        return result
-
-    def _parse_results(self, stdout: str, scenario: ScenarioConfig) -> dict[str, Any]:
-        """Parse vLLM bench stdout into a structured result dict.
-
-        Args:
-            stdout: Full standard output captured from the benchmark subprocess.
-            scenario: Scenario whose token counts seed the result dict.
-
-        Returns:
-            Dict of metric name → value, keyed with display-friendly names.
-        """
-        results: dict[str, Any] = {
-            "Input Tokens": scenario.input_tokens,
-            "Output Tokens": self._scenario_output_tokens(scenario),
-            "Concurrent": scenario.max_concurrency,
-        }
-        for line in stdout.strip().split("\n"):
-            try:
-                metric, *_, score = line.split()
-            except ValueError as e:
-                logger.debug(f"Skipping unparseable line: {e}")
-                continue
-            if "Total token throughput (tok/s):" in line or "Total Token throughput (tok/s):" in line:
-                results["Total Throughput(tok/s)"] = float(score)
-            if "Output token throughput (tok/s):" in line:
-                results["Output Throughput(tok/s)"] = float(score)
-            if "TTFT" in line:
-                results[f"{metric.title()} TTFT(s)"] = round(float(score) / 1000.0, 3)
-            if "TPOT" in line:
-                results[f"{metric.title()} TPOT(ms)"] = float(score)
-            if "E2EL" in line:
-                results[f"{metric.title()} E2EL(s)"] = round(float(score) / 1000.0, 2)
-        return results
+            row.update(monitor.end(window, int(point.get("max-concurrency") or 0), slice_dir=result_dir))
+        logger.info(f"Parsed result: {row}")
+        return row
 
     def finish_info(self, desc: str = "") -> None:
-        """Write Markdown and CSV summary files for all scenario results.
+        """Write Markdown and CSV summary files, overall and per ISL/OSL pair.
 
         Args:
-            desc: Prefix text prepended to the auto-generated report description.
+            desc: Text prepended to the generated description block.
         """
-        scenario_results = self.total_results["results"]
-        report_desc = self._build_report_desc(desc)
-        headers = self._prepare_result_headers(scenario_results)
-
-        isl_osl_result: dict[str, list[Any]] = defaultdict(list)
-        for sub_result in scenario_results:
-            key = self._to_isl_osl_result(sub_result["Input Tokens"], sub_result["Output Tokens"])
-            isl_osl_result[key].append(list(sub_result.values()))
-
-        total_rows: list[Any] = []
-        for isl_osl, rows in isl_osl_result.items():
-            total_rows.extend(rows)
-            self._write_summary_files(
-                self.get_vllm_result_dir(""), headers, rows, report_desc,
-                suffix=f"_{isl_osl}", log=True,
-            )
-
-        self._write_summary_files(self.get_vllm_result_dir(""), headers, total_rows, report_desc, suffix="")
-
-    def _build_report_desc(self, prefix: str) -> str:
-        """Build the human-readable description block prepended to summary files.
-
-        Args:
-            prefix: Text to place before the auto-generated metadata lines.
-
-        Returns:
-            Multi-line description string.
-        """
-        return (
-            f"{prefix}\n"
-            f"* Performance Benchmark - {self.name} for {self.task}\n"
+        rows = self.total_results["results"]
+        if not rows:
+            return
+        headers = list(rows[0])
+        report_desc = (
+            f"{desc}\n"
+            f"* Performance Benchmark - {self.preset.kind} {self.task} with vllm bench {VLLM_BENCH_VERSION}\n"
             f"* Model Info: {self.model}\n"
             f"* Device Info: {self.device_name} x {self.used_device_num} {self.parallel_label}\n"
             f"* date: {datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}\n"
             f"* Scenario Results:"
         )
+        by_length: dict[str, list[list[Any]]] = defaultdict(list)
+        for row in rows:
+            by_length[self._length_key(row["Input Tokens"], row["Output Tokens"])].append(list(row.values()))
+        result_root = self.get_vllm_result_dir("")
+        for key, values in by_length.items():
+            self._write_summary_files(result_root, headers, values, report_desc, suffix=f"_{key}", log=True)
+        all_values = [value for values in by_length.values() for value in values]
+        self._write_summary_files(result_root, headers, all_values, report_desc, suffix="")
 
-    def _prepare_result_headers(self, scenario_results: list[dict[str, Any]]) -> list[str]:
-        """Optionally strip P95/P99 keys and return the column header list.
-
-        Args:
-            scenario_results: List of result dicts.
-
-        Returns:
-            List of column header strings derived from the first result dict.
-        """
-        return list(scenario_results[0].keys()) if scenario_results else []
-
+    @staticmethod
     def _write_summary_files(
-        self,
-        result_dir: Path,
-        headers: list[str],
-        rows: list[Any],
-        desc: str,
-        suffix: str,
-        log: bool = False,
+        result_dir: Path, headers: list[str], rows: list[list[Any]], desc: str, suffix: str, log: bool = False
     ) -> None:
-        """Write a Markdown and a CSV summary file for *rows*.
-
-        Args:
-            result_dir: Directory to write ``summary<suffix>.md`` and ``.csv``.
-            headers: Column header strings.
-            rows: List of row value lists (one per scenario result).
-            desc: Description block prepended before the table in each file.
-            suffix: Appended to ``"summary"`` to form the filename (e.g. ``"_1k_1k"``).
-            log: When ``True``, also emit the Markdown table to the logger.
-        """
+        """Write ``summary<suffix>.md`` and ``.csv``; empty cells for missing values."""
         md_writer = MarkdownTableWriter()
         md_writer.headers = headers
         md_writer.value_matrix = rows
-
-        csv_lines = [",".join(headers)] + [",".join(str(v) for v in row) for row in rows]
-
+        csv_lines = [",".join(headers)] + [",".join("" if v is None else str(v) for v in row) for row in rows]
         if log:
             logger.info("\n".join([desc, md_writer.dumps()]))
+        (result_dir / f"summary{suffix}.md").write_text(desc + "\n" + md_writer.dumps() + "\n")
+        (result_dir / f"summary{suffix}.csv").write_text(desc + "\n" + "\n".join(csv_lines) + "\n")
 
-        with Path.open(result_dir / f"summary{suffix}.md", "w") as f:
-            f.write(desc + "\n" + md_writer.dumps() + "\n")
-
-        with Path.open(result_dir / f"summary{suffix}.csv", "w") as f:
-            f.write(desc + "\n" + "\n".join(csv_lines) + "\n")
-
-    def _to_isl_osl_result(self, input_tokens: int, output_tokens: int) -> str:
-        """Return a compact ``"<ISL>_<OSL>"`` key for grouping results.
-
-        Args:
-            input_tokens: Input sequence length in tokens.
-            output_tokens: Output sequence length in tokens.
-
-        Returns:
-            String like ``"1k_1k"`` or ``"512_256"``.
-        """
+    @staticmethod
+    def _length_key(input_tokens: int, output_tokens: int) -> str:
+        """Compact ``"<ISL>_<OSL>"`` key such as ``"1k_1k"`` for grouping summary files."""
         isl = f"{input_tokens // 1024}k" if input_tokens >= 1024 else str(input_tokens)
         osl = f"{output_tokens // 1024}k" if output_tokens >= 1024 else str(output_tokens)
         return f"{isl}_{osl}"
 
-    def get_base_dir(self) -> Path:
-        """Return (and create) the top-level workspace directory.
-
-        Returns:
-            Resolved :class:`~pathlib.Path` to ``./bench_space/``.
-        """
-        workspace = Path(WORKSPACE)
-        workspace.mkdir(parents=True, exist_ok=True)
-        return workspace
-
     def get_vllm_result_dir(self, result_name: str) -> Path:
-        """Return (and create) the per-scenario result directory.
+        """Return (and create) a result directory under the run's model directory.
 
         Args:
-            result_name: Sub-path appended after the model directory
-                (e.g. ``"1024.1024.8"`` or ``""`` for the summary root).
+            result_name: Point name, or ``""`` for the model directory itself.
 
         Returns:
-            Resolved absolute :class:`~pathlib.Path` to the result directory.
+            Absolute path of the directory.
         """
-        task_name = self.task
+        layout = f"-{self.parallel_label}" if self.parallel_label else ""
         result_dir = (
             self.base_dir
-            / f"{self.device_name}_{self.used_device_num}{f'-{self.parallel_label}' if self.parallel_label else ''}_{self.backend}"
-            / self.name
-            / task_name
+            / f"{self.device_name}_{self.used_device_num}{layout}_{self.backend}"
+            / RESULT_GROUP
+            / self.task
             / self.model.split("/")[-1]
             / result_name
         )
@@ -484,15 +356,13 @@ class VllmPerformanceBenchmark:
         return result_dir.resolve()
 
     def stop(self) -> None:
-        """Terminate the running benchmark subprocess if one is active."""
+        """Terminate the running client process group, if any."""
         if self.bench_process is None:
             return
-
         if self.bench_process.poll() is None:
             try:
                 os.killpg(os.getpgid(self.bench_process.pid), signal.SIGTERM)
                 self.bench_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(os.getpgid(self.bench_process.pid), signal.SIGKILL)
-
         self.bench_process = None
