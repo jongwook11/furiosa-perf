@@ -1,4 +1,4 @@
-"""Entry point for the furiosa-perf CLI: the ``run`` and ``report`` commands."""
+"""Entry point for the furiosa-perf CLI: the ``run``, ``env`` and ``report`` commands."""
 
 import warnings
 
@@ -7,6 +7,7 @@ import warnings
 # since the functionality is unaffected.
 warnings.filterwarnings("ignore", message=".*doesn't match a supported version.*")
 
+import json  # noqa: E402
 import shlex  # noqa: E402
 import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -15,7 +16,7 @@ import click  # noqa: E402
 
 from furiosa_perf.log import logger, setup_logger  # noqa: E402
 from furiosa_perf.reporting.command import report  # noqa: E402
-from furiosa_perf.runner.env import SystemDetector  # noqa: E402
+from furiosa_perf.runner import env as environment  # noqa: E402
 from furiosa_perf.runner.runner import BenchmarkRunner  # noqa: E402
 from furiosa_perf.runner.server import server_command  # noqa: E402
 from furiosa_perf.spec import Server, apply_server_overrides, load_preset, load_server  # noqa: E402
@@ -70,20 +71,12 @@ def run(
         return
 
     logger.info(f"Starting furiosa-perf: {server.backend} serving {server.model} on devices {server.devices}")
-    system_valid, system_info = SystemDetector.check_system_compatibility(
-        server.hardware_type, server.backend, str(server.python)
-    )
-    if not system_valid:
-        logger.error("Hardware compatibility check failed. Exiting.")
-        raise SystemExit(1)
-    num_detected = len(system_info.hardware[server.hardware_type]["devices"])
-    missing = [index for index in server.devices if index >= num_detected]
-    if missing:
-        raise click.UsageError(
-            f"the device indices {missing} are invalid; {num_detected} {server.hardware_type.upper()} devices are detected"
-        )
+    env = environment.collect(server)
+    problems = environment.check(env, server)
+    if problems:
+        raise click.UsageError("; ".join(problems))
 
-    runner = BenchmarkRunner(system_info, server, benchmark, output_dir, resume=resume, overwrite=overwrite)
+    runner = BenchmarkRunner(env, server, benchmark, output_dir, resume=resume, overwrite=overwrite)
     logger.info("Benchmarking started.")
     runner.execute(reuse_server=reuse_server)
     logger.info("Benchmarking completed.")
@@ -100,12 +93,41 @@ def _print_check(server: Server, num_points: int) -> None:
         click.echo(f"warning: {server.executable} does not exist on this host", err=True)
 
 
+@click.command(name="env")
+@click.option(
+    "--server-config",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    help="Server config whose environment, devices and model are inspected.",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Also write the raw probe outputs to this directory (the env/ of a run).",
+)
+def env_command(server_config: Path, output: Path | None) -> None:
+    """Show the environment a run with this server config would record, without running it."""
+    setup_logger("WARNING")
+    try:
+        server = load_server(server_config, default_env=Path(sys.prefix))
+    except ValueError as e:
+        raise click.UsageError(str(e)) from None
+    env = environment.collect(server)
+    click.echo(json.dumps(env.summary(server.devices), indent=2, default=str))
+    for problem in environment.check(env, server):
+        click.echo(f"warning: {problem}", err=True)
+    if output is not None:
+        env.write_raw(output)
+        click.echo(f"raw probe outputs written to {output}", err=True)
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli() -> None:
     """furiosa-perf: LLM serving performance benchmark CLI."""
 
 
 cli.add_command(run)
+cli.add_command(env_command)
 cli.add_command(report)
 
 if __name__ == "__main__":

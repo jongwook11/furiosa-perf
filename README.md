@@ -107,6 +107,16 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 | `--reuse-server` | | off | Benchmark a server already running on the configured port instead of launching one |
 | `--check` | | off | Validate the server config and preset, print the server command (preset server options applied) and point count, and exit (no hardware needed) |
 
+### Inspecting the environment
+
+```bash
+furiosa-perf env --server-config examples/server/exaone4.yaml [--output ./env-dump]
+```
+
+Prints what a run with this server config would record, without launching anything: host (OS, kernel, CPU, memory, container), the devices (name, driver, firmware, PCIe link, NUMA node, links between devices, idle power; GPU power limits — current, default, min, max — or the RNGD governor), the server environment's Python and backend versions and where the backend is imported from, driver and runtime apt packages, the model's Hub revision, and the relevant environment variables (secrets masked). Problems that would stop `run` (backend missing from `env`, unknown device indices) are printed as warnings. `--output` also writes the raw probe outputs.
+
+`run` collects the same information before launching the server: it goes into the `environment` section of `run.json` and raw into `env/`. At the end of the run the power settings are read again; if they changed, `run.json` has `power_settings_changed: true`.
+
 ---
 
 ## Config reference
@@ -238,6 +248,8 @@ results/
     └── <DEVICE>_<NUM>[-<LAYOUT>]_<BACKEND>_<VERSION>/   # e.g. RNGD_4_furiosa-llm_2026.4.0, H100-80GB-HBM3_2-tp1-dp2_vllm_0.30.0
         └── <task>/<org>--<model>/                 # e.g. text-gen/furiosa-ai--Qwen3-8B-FP8
             ├── run.json                  # what was run, on what, with which versions; status and point counts
+            ├── env/                      # raw environment probes: host.txt, smi.txt, topology.txt, devices.json,
+            │                             #   packages.txt, server-freeze.txt, client-freeze.txt, env-vars.json
             ├── server.log                # API server output
             ├── summary_<ISL>_<OSL>.md|.csv  summary.md|.csv
             ├── monitor.csv               # 1 Hz: device sum/mean, server /metrics, server/client/host CPU and memory

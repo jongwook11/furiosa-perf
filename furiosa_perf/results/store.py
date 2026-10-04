@@ -4,6 +4,7 @@ Layout under the output directory::
 
     <kind>/<device>_<num devices>[-<layout>]_<backend>_<version>/<task>/<org>--<model>/
         run.json                  what was run, on what, with which versions
+        env/                      raw environment probes: host, devices, topology, packages, freezes
         server.log  monitor.csv  devices.csv  metrics_snapshots.jsonl
         summary.csv  summary.md   (and per ISL/OSL pair)
         <point>/
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 RUN_FILE = "run.json"
+ENV_DIR = "env"  # raw environment probes (see furiosa_perf.runner.env)
 RECORD_FILE = "record.json"
 SERVER_LOG = "server.log"
 

@@ -10,8 +10,8 @@ import requests
 
 from furiosa_perf.clients.vllm_bench import VLLM_BENCH_VERSION, VllmPerformanceBenchmark
 from furiosa_perf.log import logger
-from furiosa_perf.results.store import RUN_FILE, SERVER_LOG, prepare_run_dir, run_dir, write_json
-from furiosa_perf.runner.env import device_label
+from furiosa_perf.results.store import ENV_DIR, RUN_FILE, SERVER_LOG, prepare_run_dir, run_dir, write_json
+from furiosa_perf.runner.env import Environment, device_label, freeze, power_settings
 from furiosa_perf.runner.monitor import HardwareMonitor, MonitorConfig
 from furiosa_perf.runner.server import APIServerManager
 from furiosa_perf.spec import Preset, Server
@@ -27,7 +27,7 @@ class BenchmarkRunner:
 
     def __init__(
         self,
-        system_info: Any,
+        environment: Environment,
         server: Server,
         preset: Preset,
         output_dir: Path,
@@ -37,23 +37,22 @@ class BenchmarkRunner:
         """Resolve the run directory and the fields every record carries.
 
         Args:
-            system_info: :class:`SystemDetector.SystemEnv` namedtuple with OS/HW info.
+            environment: Collected environment (see :func:`furiosa_perf.runner.env.collect`).
             server: What API server to launch, with the preset's server options applied.
             preset: What to measure.
             output_dir: Root of the results tree.
             resume: Continue a run already in the run directory.
             overwrite: Replace a run already in the run directory.
         """
-        self.system_info = system_info
+        self.environment = environment
         self.server = server
         self.preset = preset
         self.resume = resume
         self.overwrite = overwrite
 
-        hardware = system_info.hardware[server.hardware_type]
-        used = [hardware["devices"][i] for i in server.devices if i < len(hardware["devices"])]
-        product = used[0].get("name", hardware["name"]) if used else hardware["name"]
-        backend, _, backend_version = system_info.runtime.partition("_")
+        used = environment.used_devices(server.devices)
+        product = used[0]["name"] if used else "Unknown"
+        backend, backend_version = server.backend, str(environment.server_env.get("version"))
         # The served ID is known before launch, so a conflicting run is found without starting the server.
         self.model = str(server.args.get("served-model-name") or server.model)
         self.identity: dict[str, Any] = {
@@ -75,7 +74,7 @@ class BenchmarkRunner:
             self.identity["hardware"],
             len(server.devices),
             server.parallel.label,
-            system_info.runtime,
+            f"{backend}_{backend_version}",
             preset.task,
             self.model,
         )
@@ -103,6 +102,7 @@ class BenchmarkRunner:
         logger.info(f"Results: {self.run_dir}")
         run_info = self._run_info()
         write_json(self.run_dir / RUN_FILE, run_info)
+        self.environment.write_raw(self.run_dir / ENV_DIR)
 
         api_server = APIServerManager(self.server, log_path=self.run_dir / SERVER_LOG)
         benchmark: VllmPerformanceBenchmark | None = None
@@ -116,9 +116,9 @@ class BenchmarkRunner:
             run_info["server"]["command"] = server_command
             write_json(self.run_dir / RUN_FILE, run_info)
             desc = (
-                f"* Ubuntu Version: {self.system_info.os}\n"
-                f"* Python Version: {self.system_info.python}\n"
-                f"* Framework Version: {self.system_info.runtime}\n"
+                f"* OS: {self.environment.host.get('os')}\n"
+                f"* Python Version: {self.environment.server_env.get('python_version')}\n"
+                f"* Framework Version: {self.identity['backend']} {self.identity['backend_version']}\n"
                 f"* API Server Command: {server_command}"
             )
             served = self._fetch_pretrained_id(api_server)
@@ -135,6 +135,8 @@ class BenchmarkRunner:
                 resume=self.resume,
             )
             benchmark.setup()
+            if benchmark.python is not None:
+                (self.run_dir / ENV_DIR / "client-freeze.txt").write_text(freeze(benchmark.python))
 
             monitor = HardwareMonitor(
                 MonitorConfig(
@@ -162,6 +164,7 @@ class BenchmarkRunner:
             try:
                 self._cleanup(benchmark, monitor, api_server, desc)
                 rows = benchmark.total_results["results"] if benchmark is not None else []
+                run_info["power_settings_changed"] = self._power_settings_changed()
                 run_info.update(
                     status=status,
                     finished=datetime.now(timezone.utc).isoformat(),
@@ -174,9 +177,25 @@ class BenchmarkRunner:
 
         return benchmark.total_results["results"]  # type: ignore[no-any-return]
 
+    def _power_settings_changed(self) -> bool | None:
+        """Whether a used device's power limit or governor changed since the run started.
+
+        Power and efficiency figures assume the settings recorded at the start; a
+        change in between is logged and flagged in ``run.json``.
+        """
+        keys = ("index", "governor") if self.server.hardware_type == "npu" else ("index", "power_limit_w")
+        before = [{key: d.get(key) for key in keys} for d in self.environment.used_devices(self.server.devices)]
+        try:
+            after = power_settings(self.server.hardware_type, self.server.devices)
+        except Exception as e:
+            logger.warning(f"cannot re-read the power settings at the end of the run; cause: {e}")
+            return None
+        if after != before:
+            logger.warning(f"the device power settings changed during the run: {before} -> {after}")
+        return after != before
+
     def _run_info(self) -> dict[str, Any]:
         """Initial content of ``run.json``: what is run, on what, with which versions."""
-        hardware = self.system_info.hardware[self.server.hardware_type]
         return {
             **self.identity,
             "status": "running",
@@ -184,9 +203,7 @@ class BenchmarkRunner:
             "finished": None,
             "client": self.preset.client,
             "client_version": VLLM_BENCH_VERSION,
-            "python": self.system_info.python,
-            "os": self.system_info.os,
-            "device_info": [hardware["devices"][i] for i in self.server.devices if i < len(hardware["devices"])],
+            "environment": self.environment.summary(self.server.devices),
             "server": {
                 "backend": self.server.backend,
                 "model": self.server.model,
