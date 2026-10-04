@@ -26,15 +26,26 @@ RECORD_FILE = "record.json"
 SERVER_LOG = "server.log"
 
 
+# Load options of service-simulation points (AIPerf) -> name prefix.
+SIMULATION_LOAD_PREFIXES = {"concurrency": "u", "user-centric-rate": "ucr", "num-users": "n", "request-rate": "r"}
+
+
 def point_name(point: dict[str, Any]) -> str:
-    """Directory name of a point, e.g. ``i1024-o128-c16``, ``i512-b5-c16`` (rerank) or ``i512-c16``.
+    """Directory name of a point.
+
+    Fixed-length points: ``i1024-o128-c16``, ``i512-b5-c16`` (rerank) or ``i512-c16``
+    (embedding). Simulation points are named by their load: ``u32`` for 32 users,
+    ``ucr2.0-n64`` for a user-centric rate, ``r4.0`` for a request rate.
 
     Args:
         point: Client options of the point.
 
     Returns:
-        ``i<input len>``, then ``o<output len>`` or ``b<documents>`` when set, then ``c<concurrency>``.
+        The name.
     """
+    load = [f"{prefix}{point[key]}" for key, prefix in SIMULATION_LOAD_PREFIXES.items() if key in point]
+    if load and "random-input-len" not in point:
+        return "-".join(load)
     parts = [f"i{point.get('random-input-len')}"]
     if point.get("random-output-len"):
         parts.append(f"o{point['random-output-len']}")

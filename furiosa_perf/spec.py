@@ -253,10 +253,16 @@ def apply_server_overrides(server: Server, overrides: dict[str, Any]) -> Server:
     return replace(server, args=args)
 
 
-# Client options furiosa-perf sets itself (target server and result file).
-MANAGED_CLIENT_ARGS = ("model", "host", "port", "base-url", "save-result", "result-dir", "result-filename")
-CLIENTS = ("vllm-bench",)
-KINDS = ("baseline",)
+# Client -> options furiosa-perf sets itself (target server, result location, UI).
+MANAGED_CLIENT_ARGS: dict[str, tuple[str, ...]] = {
+    "vllm-bench": ("model", "host", "port", "base-url", "save-result", "result-dir", "result-filename"),
+    "aiperf": ("model", "model-names", "url", "artifact-dir", "output-artifact-dir", "ui-type", "ui"),
+}
+CLIENTS = tuple(MANAGED_CLIENT_ARGS)
+# baseline: fixed-length sweep; simulation: service traffic such as multi-turn chat.
+KINDS = ("baseline", "simulation")
+# Service-level objectives a preset may set; each limits one latency percentile.
+SLO_KEYS = ("ttft_p95_ms", "tpot_p95_ms")
 # Requests per point when the preset does not say: enough for every concurrent slot
 # to be refilled twice after the first wave.
 PROMPTS_PER_CONCURRENCY = 3
@@ -272,6 +278,8 @@ class Preset:
         client: Benchmark client; ``vllm-bench`` runs ``vllm bench serve``.
         server: Server options the measurement requires, applied over the server config.
         points: One mapping of client options per measurement point, already expanded.
+        slo: Latency limits a point must meet to count towards capacity, e.g.
+            ``{"ttft_p95_ms": 3000, "tpot_p95_ms": 50}``; empty for no SLO.
     """
 
     kind: str
@@ -279,6 +287,7 @@ class Preset:
     client: str
     server: dict[str, Any]
     points: list[dict[str, Any]]
+    slo: dict[str, float] = field(default_factory=dict)
 
 
 def _kebab(mapping: dict[str, Any]) -> dict[str, Any]:
@@ -326,9 +335,11 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         ValueError: If a key is missing or unknown, or ``args``/``matrix`` set an
             option furiosa-perf manages.
     """
-    unknown = set(raw) - {"kind", "task", "client", "server", "args", "matrix"}
+    unknown = set(raw) - {"kind", "task", "client", "server", "args", "matrix", "slo"}
     if unknown:
-        raise ValueError(f"the preset keys {sorted(unknown)} are unknown; use kind, task, client, server, args and matrix")
+        raise ValueError(
+            f"the preset keys {sorted(unknown)} are unknown; use kind, task, client, server, args, matrix and slo"
+        )
     for key in ("kind", "task", "client"):
         if not raw.get(key):
             raise ValueError(f"the preset is missing '{key}'")
@@ -337,8 +348,13 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
     if raw["client"] not in CLIENTS:
         raise ValueError(f"the client '{raw['client']}' is unsupported; use one of {', '.join(CLIENTS)}")
 
+    slo = raw.get("slo") or {}
+    unknown_slo = set(slo) - set(SLO_KEYS)
+    if unknown_slo:
+        raise ValueError(f"the SLO keys {sorted(unknown_slo)} are unknown; use {', '.join(SLO_KEYS)}")
+
     points = expand_matrix(_kebab(raw.get("args") or {}), raw.get("matrix") or [])
-    managed = sorted({key for point in points for key in point if key in MANAGED_CLIENT_ARGS})
+    managed = sorted({key for point in points for key in point if key in MANAGED_CLIENT_ARGS[raw["client"]]})
     if managed:
         raise ValueError(f"the client options {managed} are not allowed; furiosa-perf sets them from the server config")
     return Preset(
@@ -347,6 +363,7 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         client=str(raw["client"]),
         server=_kebab(raw.get("server") or {}),
         points=points,
+        slo={key: float(value) for key, value in slo.items()},
     )
 
 

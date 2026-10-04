@@ -8,7 +8,9 @@ from typing import Any
 
 import requests
 
-from furiosa_perf.clients.vllm_bench import VLLM_BENCH_VERSION, VllmPerformanceBenchmark
+from furiosa_perf.clients.aiperf import AiperfClient
+from furiosa_perf.clients.base import BenchmarkClient
+from furiosa_perf.clients.vllm_bench import VllmBenchClient
 from furiosa_perf.log import logger
 from furiosa_perf.results.store import ENV_DIR, RUN_FILE, SERVER_LOG, prepare_run_dir, run_dir, write_json
 from furiosa_perf.runner.env import Environment, device_label, freeze, power_settings
@@ -16,11 +18,14 @@ from furiosa_perf.runner.monitor import HardwareMonitor, MonitorConfig
 from furiosa_perf.runner.server import APIServerManager
 from furiosa_perf.spec import Preset, Server
 
+# Preset client name -> implementation.
+CLIENTS: dict[str, type[BenchmarkClient]] = {"vllm-bench": VllmBenchClient, "aiperf": AiperfClient}
+
 
 class BenchmarkRunner:
     """Orchestrate the full benchmark lifecycle: server → benchmark → teardown.
 
-    Owns the :class:`APIServerManager` and :class:`VllmPerformanceBenchmark`
+    Owns the :class:`APIServerManager` and :class:`BenchmarkClient`
     instances, coordinates their startup, monitoring and cleanup, and keeps
     ``run.json`` of the run directory up to date.
     """
@@ -105,7 +110,7 @@ class BenchmarkRunner:
         self.environment.write_raw(self.run_dir / ENV_DIR)
 
         api_server = APIServerManager(self.server, log_path=self.run_dir / SERVER_LOG)
-        benchmark: VllmPerformanceBenchmark | None = None
+        benchmark: BenchmarkClient | None = None
         monitor: HardwareMonitor | None = None
         desc = ""
         status = "failed"
@@ -125,7 +130,7 @@ class BenchmarkRunner:
             if served != self.model:
                 logger.warning(f"the server reports model '{served}', the results are stored as '{self.model}'")
 
-            benchmark = VllmPerformanceBenchmark(
+            benchmark = CLIENTS[self.preset.client](
                 preset=self.preset,
                 model=served,
                 host=self.server.host,
@@ -133,6 +138,7 @@ class BenchmarkRunner:
                 run_dir=self.run_dir,
                 identity=self.identity,
                 resume=self.resume,
+                tokenizer=self.server.model,
             )
             benchmark.setup()
             if benchmark.python is not None:
@@ -165,6 +171,8 @@ class BenchmarkRunner:
                 self._cleanup(benchmark, monitor, api_server, desc)
                 rows = benchmark.total_results["results"] if benchmark is not None else []
                 run_info["power_settings_changed"] = self._power_settings_changed()
+                if benchmark is not None:
+                    run_info.update(benchmark.run_summary())
                 run_info.update(
                     status=status,
                     finished=datetime.now(timezone.utc).isoformat(),
@@ -202,7 +210,7 @@ class BenchmarkRunner:
             "started": datetime.now(timezone.utc).isoformat(),
             "finished": None,
             "client": self.preset.client,
-            "client_version": VLLM_BENCH_VERSION,
+            "client_version": CLIENTS[self.preset.client].VERSION,
             "environment": self.environment.summary(self.server.devices),
             "server": {
                 "backend": self.server.backend,
@@ -236,7 +244,7 @@ class BenchmarkRunner:
 
     def _cleanup(
         self,
-        benchmark: VllmPerformanceBenchmark | None,
+        benchmark: BenchmarkClient | None,
         monitor: HardwareMonitor | None,
         api_server: APIServerManager | None,
         desc: str,
@@ -247,7 +255,7 @@ class BenchmarkRunner:
             benchmark: Benchmark instance to stop and finalise (may be ``None``).
             monitor: Hardware monitor to stop (may be ``None``).
             api_server: API server to stop (may be ``None``).
-            desc: Passed through to :meth:`VllmPerformanceBenchmark.finish_info`.
+            desc: Passed through to :meth:`BenchmarkClient.finish_info`.
         """
         if benchmark is not None:
             try:

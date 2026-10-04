@@ -22,10 +22,12 @@ from furiosa_perf.results.store import (
         ({"random-input-len": 1024, "random-output-len": 128, "max-concurrency": 8}, "i1024-o128-c8"),
         ({"random-input-len": 512, "random-batch-size": 5, "max-concurrency": 4}, "i512-b5-c4"),
         ({"random-input-len": 256, "max-concurrency": 1}, "i256-c1"),
+        ({"concurrency": 32, "isl": 150}, "u32"),
+        ({"user-centric-rate": 2.0, "num-users": 64}, "ucr2.0-n64"),
     ],
 )
 def test_point_name_says_what_each_number_is(point: dict[str, object], expected: str) -> None:
-    """Generation, rerank and embedding points are named by input, output or documents, and concurrency."""
+    """Baseline points are named by input, output or documents and concurrency; simulation points by their load."""
     assert point_name(point) == expected
 
 

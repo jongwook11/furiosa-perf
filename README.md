@@ -212,6 +212,7 @@ A preset says what to measure: which client, which server options the measuremen
 | `baseline/vision` | One 256x256 image plus text, the same total lengths as `text-gen` |
 | `baseline/embedding` | Embeddings, 256 to 32k input tokens |
 | `baseline/rerank` | Reranking, 5 documents per query, 256 to 8k tokens |
+| `simulation/chat-synthetic` | General chatbot: multi-turn synthetic conversations, users swept from 8 to 256, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
 
 The bundled files are in [`furiosa_perf/presets/`](furiosa_perf/presets); copy one to change the points. The format:
 
@@ -234,7 +235,17 @@ matrix:                   # one point per combination; list values are expanded
 - furiosa-perf sets the client's target (`model`, `host`, `port`) and result file itself; presets cannot.
 - The baseline presets turn prefix caching off (random prompts must not hit a cache) and remove any reasoning parser, so thinking tokens stay in `content`, which is what the client counts.
 
-**Point validity.** Each summary row has `ok` and `fail_reason`. A point is invalid when the client exits with an error, more than 5 % of its requests fail, a generation point counts no output tokens, or, with `ignore-eos`, fewer than 90 % of the requested output tokens come back. Invalid points keep their measured values. The run goes on after an invalid point unless the server stopped answering, in which case it stops and reports how many points were not run.
+**Service simulation (`kind: simulation`, `client: aiperf`).** Points run [AIPerf](https://github.com/ai-dynamo/aiperf) (pinned, own venv). In `simulation/chat-synthetic` every user holds one conversation: a system prompt shared by all users (1,000 tokens), a context of their own (500), then 5 ± 2 turns of 150 ± 50 tokens in and 300 ± 100 out, with 10 ± 5 s of think time between a reply and the next message. Each turn re-sends the conversation so far, including the replies the server generated, so the server keeps prefix caching on. A point's `concurrency` is the number of users talking at once (a user keeps their slot during think time). The preset also sets `max-model-len: 8192` and turns thinking off for models that support it (`default-chat-template-kwargs: {enable_thinking: false}`).
+
+```yaml
+slo:                      # p95 limits; a point meets the SLO when both hold
+  ttft_p95_ms: 3000
+  tpot_p95_ms: 50
+```
+
+Each simulation summary row has `slo_met`, and `run.json` gets `capacity: {slo, max_users}`: the most users whose point was valid and met the SLO, counting up to the first point that did not. The SLO is also passed to AIPerf as `--goodput`, reported per point as `Goodput(req/s)`.
+
+**Point validity.** Each summary row has `ok` and `fail_reason`. A baseline point is invalid when the client exits with an error, more than 5 % of its requests fail, a generation point counts no output tokens, or, with `ignore-eos`, fewer than 90 % of the requested output tokens come back. A simulation point is invalid when AIPerf exits with an error, no request completes, more than 5 % fail, or a streaming run measures no time to first token. Invalid points keep their measured values. The run goes on after an invalid point unless the server stopped answering, in which case it stops and reports how many points were not run.
 
 ---
 

@@ -44,8 +44,10 @@ def test_expand_matrix_keeps_an_explicit_prompt_count_and_runs_args_alone_withou
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"kind": "simulation"}, "kind 'simulation' is unsupported"),
-        ({"client": "aiperf"}, "client 'aiperf' is unsupported"),
+        ({"kind": "trace"}, "kind 'trace' is unsupported"),
+        ({"client": "guidellm"}, "client 'guidellm' is unsupported"),
+        ({"slo": {"ttft_p99_ms": 1}}, "SLO keys \\['ttft_p99_ms'\\] are unknown"),
+        ({"client": "aiperf", "args": {"url": "x"}}, "'url'\\] are not allowed"),
         ({"task": ""}, "missing 'task'"),
         ({"scenarios": []}, "keys \\['scenarios'\\] are unknown"),
         ({"args": {"result-dir": "out"}}, "'result-dir'\\] are not allowed"),
@@ -64,7 +66,10 @@ def test_every_bundled_preset_loads(path: Path) -> None:
     loaded = load_preset(str(path.relative_to(PRESETS_DIR).with_suffix("")))
 
     assert loaded.points
-    assert all("random-input-len" in p and isinstance(p["max-concurrency"], int) for p in loaded.points)
+    if loaded.kind == "baseline":
+        assert all("random-input-len" in p and isinstance(p["max-concurrency"], int) for p in loaded.points)
+    else:
+        assert all(isinstance(p["concurrency"], int) for p in loaded.points)
 
 
 def test_preset_server_options_win_and_null_removes_an_option() -> None:
