@@ -27,6 +27,8 @@ from furiosa_perf.spec import Preset
 
 CLIENT_PYTHON = "3.12"
 CLIENT_LOG = "bench.log"
+# Start of the fail_reason clients give when the tool itself exited with an error.
+CLIENT_FAILURE = "client exited"
 
 
 def client_env_dir(package: str, version: str) -> Path:
@@ -126,6 +128,7 @@ class BenchmarkClient:
         self.process: subprocess.Popen[str] | None = None
         self.total_results: dict[str, Any] = {"results": []}
         self.search_outcome: SearchOutcome | None = None
+        self.before_point: Callable[[], None] | None = None
 
     @property
     def python(self) -> Path | None:
@@ -177,7 +180,12 @@ class BenchmarkClient:
         """Whether a point counts as passing in a capacity search; clients with an SLO refine this."""
         return bool(row["ok"])
 
-    def run(self, monitor: HardwareMonitor | None = None, server_alive: Callable[[], bool] | None = None) -> None:
+    def run(
+        self,
+        monitor: HardwareMonitor | None = None,
+        server_alive: Callable[[], bool] | None = None,
+        before_point: Callable[[], None] | None = None,
+    ) -> None:
         """Run the preset's points, or its capacity search, and collect the summary rows.
 
         An invalid point does not stop the run. If the server is found dead after
@@ -188,10 +196,13 @@ class BenchmarkClient:
                 :meth:`HardwareMonitor.begin` / :meth:`HardwareMonitor.end`.
             server_alive: Returns whether the server still answers; checked after an
                 invalid point.
+            before_point: Called before every point that is measured (not before
+                points kept on resume), e.g. to restart the server.
 
         Raises:
             RuntimeError: If the server stopped during the run.
         """
+        self.before_point = before_point
         self.total_results = {"model": self.model, "task": self.task, "results": []}
         search = self.preset.search
         if search is None:
@@ -207,12 +218,29 @@ class BenchmarkClient:
                 search.min,
                 search.max,
                 search.step,
-                lambda value: self.passes(self._measure({**base, search.key: value}, monitor, server_alive)),
+                lambda value: self._search_probe({**base, search.key: value}, monitor, server_alive),
             )
             logger.info(f"Capacity search: {search.key} = {self.search_outcome.capacity} ({self.search_outcome.bound})")
 
         rows = self.total_results["results"]
         logger.info(f"{len(rows)} points run, {sum(not row['ok'] for row in rows)} invalid")
+
+    def _search_probe(
+        self, point: dict[str, Any], monitor: HardwareMonitor | None, server_alive: Callable[[], bool] | None
+    ) -> bool:
+        """Measure one search point and say whether it passed.
+
+        Raises:
+            RuntimeError: If the client itself failed: the point says nothing about the
+                server's capacity, so the search cannot go on.
+        """
+        row = self._measure(point, monitor, server_alive)
+        if str(row.get("fail_reason", "")).startswith(CLIENT_FAILURE):
+            raise RuntimeError(
+                f"the benchmark client failed at point {point_name(point)} ({row['fail_reason']}); "
+                f"the capacity search stops, see {self.point_dir(point_name(point)) / CLIENT_LOG}"
+            )
+        return self.passes(row)
 
     def _measure(
         self, point: dict[str, Any], monitor: HardwareMonitor | None, server_alive: Callable[[], bool] | None
@@ -227,6 +255,8 @@ class BenchmarkClient:
             logger.info(f"point {point_name(point)} is already recorded as valid; keeping it")
             self.total_results["results"].append(kept)
             return kept
+        if self.before_point is not None:
+            self.before_point()
         row = self._run_point(point, monitor)
         self.total_results["results"].append(row)
         if not row["ok"]:

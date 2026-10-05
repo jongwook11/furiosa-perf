@@ -254,6 +254,8 @@ search:
   step: 4                 # stop when the passing and failing counts are 4 apart
 ```
 
+`restart-server: per-point` (set in `simulation/chat-synthetic`) launches a fresh server before every measured point, so no point inherits the previous one's prefix cache, queue or load; the preset's AIPerf warm-up (`warmup-request-count`) then primes the new server outside the measurement. The default, `never`, keeps one server for the whole run, as the baseline presets do.
+
 Both ends are measured first; if `min` already misses the SLO or `max` still meets it, the run says so (`bound: below_min` / `at_least_max`) instead of searching. Otherwise each probe halves the range, so 8..256 with step 4 takes at most 8 points. Override the range per run with `--search-min` / `--search-max`; `--check` prints the plan. Passing assumes more users never improves latency, so a noisy point at the edge can move the result by about one step.
 
 Each simulation summary row has `slo_met`, and `run.json` gets `capacity: {slo, max_users, search}`: the most users whose point was valid and met the SLO, and with a search its range, step, bound and every probe with its verdict. The SLO is also passed to AIPerf as `--goodput`, reported per point as `Goodput(req/s)`.

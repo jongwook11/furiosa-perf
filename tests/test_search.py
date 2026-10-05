@@ -118,3 +118,19 @@ def test_the_loop_runs_the_search_and_reports_it_as_capacity(tmp_path: Path) -> 
     assert [row["Users"] for row in client.total_results["results"]] == [
         probe["value"] for probe in capacity["search"]["probes"]
     ]
+
+
+class CrashingAiperf(FakeAiperf):
+    """AiperfClient whose tool fails on the first point, as with an invalid option."""
+
+    def _run_point(self, point: dict[str, Any], monitor: Any) -> dict[str, Any]:
+        return {"Users": point["concurrency"], "ok": False, "fail_reason": "client exited with code 1", "slo_met": None}
+
+
+def test_a_client_failure_stops_the_search_instead_of_counting_as_a_miss(tmp_path: Path) -> None:
+    """A crashed tool says nothing about capacity, so no "below_min" verdict is drawn from it."""
+    client = CrashingAiperf(load_preset("simulation/chat-synthetic"), "m", "h", 1, tmp_path, {})
+
+    with pytest.raises(RuntimeError, match="benchmark client failed at point u8"):
+        client.run()
+    assert client.search_outcome is None

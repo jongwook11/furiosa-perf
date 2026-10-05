@@ -11,6 +11,10 @@ kind: simulation
 task: chat
 client: aiperf
 
+# A fresh server for every point, so no point inherits the previous point's prefix
+# cache or load; the warm-up below then primes it before measuring.
+restart-server: per-point
+
 # Applied over the server config.
 server:
   enable-prefix-caching: true  # conversation history is re-sent every turn
@@ -38,6 +42,8 @@ args:
   session-turns-stddev: 2
   session-turn-delay-mean: 10000  # ms of think time between a reply and the next message
   session-turn-delay-stddev: 5000
+  warmup-request-count: 32  # requests after the (re)start that are not measured
+  warmup-concurrency: 8
   concurrency-ramp-duration: 60  # s: users join over a minute instead of all at once
   benchmark-duration: 300  # s of measurement per point
   benchmark-grace-period: 60

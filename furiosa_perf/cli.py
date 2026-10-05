@@ -91,6 +91,8 @@ def run(
         server = apply_server_overrides(load_server(server_config, default_env=Path(sys.prefix)), benchmark.server)
     except ValueError as e:
         raise click.UsageError(str(e)) from None
+    if reuse_server and benchmark.restart_server == "per-point":
+        raise click.UsageError("--reuse-server cannot be combined with a preset that restarts the server per point")
 
     if check:
         _print_check(server, benchmark)
@@ -114,6 +116,8 @@ def _print_check(server: Server, preset: Preset) -> None:
     if "CUDA_VISIBLE_DEVICES" in env:
         click.echo(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']} \\")
     click.echo(shlex.join(argv))
+    if preset.restart_server == "per-point":
+        click.echo("the server is restarted before every point")
     search = preset.search
     if search is None:
         click.echo(f"{len(preset.points)} points")

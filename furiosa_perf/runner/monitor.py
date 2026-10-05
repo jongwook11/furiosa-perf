@@ -24,7 +24,7 @@ import json
 import math
 import multiprocessing
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from multiprocessing.process import BaseProcess
 from pathlib import Path
@@ -404,6 +404,16 @@ class HardwareMonitor:
             self._process.kill()
             self._process.join(timeout=2)
         self._process = None
+
+    def restart(self, server_pid: int) -> None:
+        """Restart sampling for a newly launched server process.
+
+        Args:
+            server_pid: PID of the new server, whose process tree is tracked from now on.
+        """
+        self.stop()
+        self.config = replace(self.config, server_pid=server_pid)
+        self.start()
 
     def begin(self, name: str) -> ScenarioWindow:
         """Mark the start of a scenario; call right before launching the client.

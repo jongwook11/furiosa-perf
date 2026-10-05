@@ -1,6 +1,7 @@
 """Benchmark orchestration: server -> monitor -> benchmark client -> teardown."""
 
 import signal
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,7 +157,13 @@ class BenchmarkRunner:
                 )
             )
             monitor.start()
-            benchmark.run(monitor, server_alive=lambda: api_server.served_model() is not None)
+            benchmark.run(
+                monitor,
+                server_alive=lambda: api_server.served_model() is not None,
+                before_point=self._restart_hook(api_server, monitor)
+                if self.preset.restart_server == "per-point"
+                else None,
+            )
             status = "finished"
 
         except KeyboardInterrupt:
@@ -184,6 +191,25 @@ class BenchmarkRunner:
                 signal.signal(signal.SIGINT, old_sigint)
 
         return benchmark.total_results["results"]  # type: ignore[no-any-return]
+
+    @staticmethod
+    def _restart_hook(api_server: APIServerManager, monitor: HardwareMonitor) -> Callable[[], None]:
+        """Restart the server (and point the monitor at it) before every measured point but the first.
+
+        The first point runs on the server launched for the run, which nothing has used yet.
+        """
+        launched_fresh = True
+
+        def restart() -> None:
+            nonlocal launched_fresh
+            if launched_fresh:
+                launched_fresh = False
+                return
+            logger.info("Restarting the server for the next point (restart-server: per-point)")
+            api_server.restart()
+            monitor.restart(server_pid=api_server.server_pid)
+
+        return restart
 
     def _power_settings_changed(self) -> bool | None:
         """Whether a used device's power limit or governor changed since the run started.

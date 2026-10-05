@@ -20,6 +20,10 @@ STARTUP_TIMEOUT_S = 1800
 STARTUP_POLL_S = 5
 HEALTH_TIMEOUT_S = 5
 LOG_TAIL_LINES = 20
+# Seconds a stopping server gets to release its devices before it is killed.
+STOP_TIMEOUT_S = 30
+# Seconds a restart waits for the old server's port to be released.
+PORT_RELEASE_TIMEOUT_S = 60
 # Variables that would point the server at another Python environment than Server.env.
 FOREIGN_PYTHON_VARS = ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME")
 
@@ -180,6 +184,25 @@ class APIServerManager:
         logger.warning(f"Using the server already running on port {port} (pid {self.server_pid})")
         return ""
 
+    def restart(self) -> str:
+        """Stop the server and launch it again with the same configuration.
+
+        Returns:
+            The server command line.
+
+        Raises:
+            RuntimeError: If the old server keeps its port or the new one fails to start.
+        """
+        self.stop()
+        deadline = time.time() + PORT_RELEASE_TIMEOUT_S
+        while pid_listening_on(self.server.port) > 0:
+            if time.time() > deadline:
+                raise RuntimeError(
+                    f"port {self.server.port} is still in use {PORT_RELEASE_TIMEOUT_S} s after the server stopped"
+                )
+            time.sleep(1)
+        return self.start()
+
     def stop(self) -> None:
         """Terminate the server process group gracefully, falling back to SIGKILL."""
         if self.server_process is None:
@@ -188,7 +211,7 @@ class APIServerManager:
             logger.info("Stopping server process…")
             try:
                 os.killpg(os.getpgid(self.server_process.pid), signal.SIGTERM)
-                self.server_process.wait(timeout=5)
+                self.server_process.wait(timeout=STOP_TIMEOUT_S)
                 logger.info("Server process stopped successfully.")
             except subprocess.TimeoutExpired:
                 os.killpg(os.getpgid(self.server_process.pid), signal.SIGKILL)

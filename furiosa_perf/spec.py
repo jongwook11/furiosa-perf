@@ -265,6 +265,9 @@ KINDS = ("baseline", "simulation")
 SLO_KEYS = ("ttft_p95_ms", "tpot_p95_ms")
 # Load options a capacity search may vary.
 SEARCH_KEYS = ("concurrency",)
+# When the server is restarted: "never" (one server for the run) or "per-point"
+# (a fresh server before every point, so no point inherits another's cache or state).
+RESTART_POLICIES = ("never", "per-point")
 
 
 @dataclass(frozen=True)
@@ -331,6 +334,7 @@ class Preset:
             ``{"ttft_p95_ms": 3000, "tpot_p95_ms": 50}``; empty for no SLO.
         search: Capacity search replacing a fixed list of load values; ``points``
             then holds the single base point the searched value is added to.
+        restart_server: ``"never"`` or ``"per-point"``, see :data:`RESTART_POLICIES`.
     """
 
     kind: str
@@ -340,6 +344,7 @@ class Preset:
     points: list[dict[str, Any]]
     slo: dict[str, float] = field(default_factory=dict)
     search: Search | None = None
+    restart_server: str = "never"
 
 
 def _kebab(mapping: dict[str, Any]) -> dict[str, Any]:
@@ -387,11 +392,13 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         ValueError: If a key is missing or unknown, or ``args``/``matrix`` set an
             option furiosa-perf manages.
     """
-    unknown = set(raw) - {"kind", "task", "client", "server", "args", "matrix", "slo", "search"}
+    known = ("kind", "task", "client", "server", "restart-server", "args", "matrix", "slo", "search")
+    unknown = set(raw) - set(known)
     if unknown:
-        raise ValueError(
-            f"the preset keys {sorted(unknown)} are unknown; use kind, task, client, server, args, matrix, slo and search"
-        )
+        raise ValueError(f"the preset keys {sorted(unknown)} are unknown; use {', '.join(known)}")
+    restart = raw.get("restart-server", "never")
+    if restart not in RESTART_POLICIES:
+        raise ValueError(f"the restart-server value '{restart}' is unsupported; use one of {', '.join(RESTART_POLICIES)}")
     for key in ("kind", "task", "client"):
         if not raw.get(key):
             raise ValueError(f"the preset is missing '{key}'")
@@ -425,6 +432,7 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         points=points,
         slo={key: float(value) for key, value in slo.items()},
         search=search,
+        restart_server=str(restart),
     )
 
 
