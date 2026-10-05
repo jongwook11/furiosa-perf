@@ -102,6 +102,7 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 | `--server-config` | ✓ | — | API server config YAML (backend, model, devices, …) |
 | `--preset` | ✓ | — | Benchmark preset: a bundled name such as `baseline/text-gen`, or a YAML file |
 | `--output-dir` | | `results` | Root of the results tree |
+| `--search-min`, `--search-max` | | from the preset | Range of the preset's capacity search for this run |
 | `--resume` | | off | Finish a run already in its results directory, keeping valid points |
 | `--overwrite` | | off | Delete a run already in its results directory and start over |
 | `--reuse-server` | | off | Benchmark a server already running on the configured port instead of launching one |
@@ -212,7 +213,7 @@ A preset says what to measure: which client, which server options the measuremen
 | `baseline/vision` | One 256x256 image plus text, the same total lengths as `text-gen` |
 | `baseline/embedding` | Embeddings, 256 to 32k input tokens |
 | `baseline/rerank` | Reranking, 5 documents per query, 256 to 8k tokens |
-| `simulation/chat-synthetic` | General chatbot: multi-turn synthetic conversations, users swept from 8 to 256, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
+| `simulation/chat-synthetic` | General chatbot: multi-turn synthetic conversations, capacity search over 8 to 256 users, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
 
 The bundled files are in [`furiosa_perf/presets/`](furiosa_perf/presets); copy one to change the points. The format:
 
@@ -243,7 +244,19 @@ slo:                      # p95 limits; a point meets the SLO when both hold
   tpot_p95_ms: 50
 ```
 
-Each simulation summary row has `slo_met`, and `run.json` gets `capacity: {slo, max_users}`: the most users whose point was valid and met the SLO, counting up to the first point that did not. The SLO is also passed to AIPerf as `--goodput`, reported per point as `Goodput(req/s)`.
+Instead of a fixed list of user counts, a simulation preset can bisect for capacity:
+
+```yaml
+search:
+  key: concurrency        # users talking at once
+  min: 8                  # expected to meet the SLO
+  max: 256                # expected to miss it
+  step: 4                 # stop when the passing and failing counts are 4 apart
+```
+
+Both ends are measured first; if `min` already misses the SLO or `max` still meets it, the run says so (`bound: below_min` / `at_least_max`) instead of searching. Otherwise each probe halves the range, so 8..256 with step 4 takes at most 8 points. Override the range per run with `--search-min` / `--search-max`; `--check` prints the plan. Passing assumes more users never improves latency, so a noisy point at the edge can move the result by about one step.
+
+Each simulation summary row has `slo_met`, and `run.json` gets `capacity: {slo, max_users, search}`: the most users whose point was valid and met the SLO, and with a search its range, step, bound and every probe with its verdict. The SLO is also passed to AIPerf as `--goodput`, reported per point as `Goodput(req/s)`.
 
 **Point validity.** Each summary row has `ok` and `fail_reason`. A baseline point is invalid when the client exits with an error, more than 5 % of its requests fail, a generation point counts no output tokens, or, with `ignore-eos`, fewer than 90 % of the requested output tokens come back. A simulation point is invalid when AIPerf exits with an error, no request completes, more than 5 % fail, or a streaming run measures no time to first token. Invalid points keep their measured values. The run goes on after an invalid point unless the server stopped answering, in which case it stops and reports how many points were not run.
 

@@ -164,8 +164,18 @@ class AiperfClient(BenchmarkClient):
         """Users of the point (``concurrency``)."""
         return int(point.get("concurrency") or 0)
 
+    def passes(self, row: dict[str, Any]) -> bool:
+        """A point passes when it is valid and meets the SLO."""
+        return bool(row["ok"]) and row["slo_met"] is True
+
     def run_summary(self) -> dict[str, Any]:
-        """``capacity``: the SLO and the most users that met it."""
+        """``capacity``: the SLO, the most users that met it and, after a search, how it was found."""
         if not self.preset.slo:
             return {}
-        return {"capacity": {"slo": self.preset.slo, "max_users": max_users_within_slo(self.total_results["results"])}}
+        capacity: dict[str, Any] = {
+            "slo": self.preset.slo,
+            "max_users": max_users_within_slo(self.total_results["results"]),
+        }
+        if self.search_outcome is not None:
+            capacity["search"] = self.search_outcome.to_dict()
+        return {"capacity": capacity}

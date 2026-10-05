@@ -19,6 +19,7 @@ from typing import Any, ClassVar
 
 from pytablewriter import MarkdownTableWriter
 
+from furiosa_perf.clients.search import SearchOutcome, bisect_capacity, max_probes
 from furiosa_perf.log import logger
 from furiosa_perf.results.store import RECORD_FILE, check_unique_point_names, point_name, read_json, write_json
 from furiosa_perf.runner.monitor import HardwareMonitor
@@ -110,7 +111,8 @@ class BenchmarkClient:
         Raises:
             ValueError: If two points of the preset would share a directory.
         """
-        check_unique_point_names(preset.points)
+        if preset.search is None:
+            check_unique_point_names(preset.points)
         self.preset = preset
         self.task = preset.task
         self.model = model
@@ -123,6 +125,7 @@ class BenchmarkClient:
         self.env: Path | None = None
         self.process: subprocess.Popen[str] | None = None
         self.total_results: dict[str, Any] = {"results": []}
+        self.search_outcome: SearchOutcome | None = None
 
     @property
     def python(self) -> Path | None:
@@ -170,8 +173,12 @@ class BenchmarkClient:
 
     # The shared point loop.
 
+    def passes(self, row: dict[str, Any]) -> bool:
+        """Whether a point counts as passing in a capacity search; clients with an SLO refine this."""
+        return bool(row["ok"])
+
     def run(self, monitor: HardwareMonitor | None = None, server_alive: Callable[[], bool] | None = None) -> None:
-        """Run all points in order and collect their summary rows.
+        """Run the preset's points, or its capacity search, and collect the summary rows.
 
         An invalid point does not stop the run. If the server is found dead after
         one, the run stops, because every later point would fail as well.
@@ -186,26 +193,47 @@ class BenchmarkClient:
             RuntimeError: If the server stopped during the run.
         """
         self.total_results = {"model": self.model, "task": self.task, "results": []}
-        points = self.preset.points
-        for index, point in enumerate(points):
-            kept = self._kept_row(point)
-            if kept is not None:
-                logger.info(f"point {point_name(point)} is already recorded as valid; keeping it")
-                self.total_results["results"].append(kept)
-                continue
-            row = self._run_point(point, monitor)
-            self.total_results["results"].append(row)
-            if row["ok"]:
-                continue
+        search = self.preset.search
+        if search is None:
+            for point in self.preset.points:
+                self._measure(point, monitor, server_alive)
+        else:
+            base = self.preset.points[0]
+            logger.info(
+                f"Capacity search over {search.key} {search.min}..{search.max} (step {search.step}), "
+                f"at most {max_probes(search.min, search.max, search.step)} points"
+            )
+            self.search_outcome = bisect_capacity(
+                search.min,
+                search.max,
+                search.step,
+                lambda value: self.passes(self._measure({**base, search.key: value}, monitor, server_alive)),
+            )
+            logger.info(f"Capacity search: {search.key} = {self.search_outcome.capacity} ({self.search_outcome.bound})")
+
+        rows = self.total_results["results"]
+        logger.info(f"{len(rows)} points run, {sum(not row['ok'] for row in rows)} invalid")
+
+    def _measure(
+        self, point: dict[str, Any], monitor: HardwareMonitor | None, server_alive: Callable[[], bool] | None
+    ) -> dict[str, Any]:
+        """Measure one point (or keep its valid record on resume) and append its summary row.
+
+        Raises:
+            RuntimeError: If the point is invalid and the server stopped answering.
+        """
+        kept = self._kept_row(point)
+        if kept is not None:
+            logger.info(f"point {point_name(point)} is already recorded as valid; keeping it")
+            self.total_results["results"].append(kept)
+            return kept
+        row = self._run_point(point, monitor)
+        self.total_results["results"].append(row)
+        if not row["ok"]:
             logger.warning(f"point {point_name(point)} is invalid: {row['fail_reason']}")
             if server_alive is not None and not server_alive():
-                raise RuntimeError(
-                    f"the server stopped answering during point {point_name(point)}; "
-                    f"{len(points) - index - 1} remaining points were not run"
-                )
-
-        num_invalid = sum(not row["ok"] for row in self.total_results["results"])
-        logger.info(f"{len(points)} points run, {num_invalid} invalid")
+                raise RuntimeError(f"the server stopped answering during point {point_name(point)}; the run stops here")
+        return row
 
     def _kept_row(self, point: dict[str, Any]) -> dict[str, Any] | None:
         """With ``resume``, the summary row of a point already recorded as valid."""

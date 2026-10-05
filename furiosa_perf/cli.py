@@ -14,12 +14,20 @@ from pathlib import Path  # noqa: E402
 
 import click  # noqa: E402
 
+from furiosa_perf.clients.search import max_probes  # noqa: E402
 from furiosa_perf.log import logger, setup_logger  # noqa: E402
 from furiosa_perf.reporting.command import report  # noqa: E402
 from furiosa_perf.runner import env as environment  # noqa: E402
 from furiosa_perf.runner.runner import BenchmarkRunner  # noqa: E402
 from furiosa_perf.runner.server import server_command  # noqa: E402
-from furiosa_perf.spec import Server, apply_server_overrides, load_preset, load_server  # noqa: E402
+from furiosa_perf.spec import (  # noqa: E402
+    Preset,
+    Server,
+    apply_server_overrides,
+    load_preset,
+    load_server,
+    with_search_range,
+)
 
 
 @click.command()
@@ -41,6 +49,16 @@ from furiosa_perf.spec import Server, apply_server_overrides, load_preset, load_
     type=click.Path(file_okay=False, path_type=Path),
     help="Root of the results tree; each run goes to <kind>/<device>/<task>/<model> under it.",
 )
+@click.option(
+    "--search-min",
+    type=click.IntRange(min=1),
+    help="Override the lower end of the preset's capacity search (e.g. users).",
+)
+@click.option(
+    "--search-max",
+    type=click.IntRange(min=1),
+    help="Override the upper end of the preset's capacity search.",
+)
 @click.option("--resume", is_flag=True, help="Finish a run already in the results directory, keeping its valid points.")
 @click.option("--overwrite", is_flag=True, help="Delete a run already in the results directory and start over.")
 @click.option(
@@ -54,20 +72,28 @@ from furiosa_perf.spec import Server, apply_server_overrides, load_preset, load_
     help="Validate the server config and preset, print the server command and point count, then exit.",
 )
 def run(
-    server_config: Path, preset: str, output_dir: Path, resume: bool, overwrite: bool, reuse_server: bool, check: bool
+    server_config: Path,
+    preset: str,
+    output_dir: Path,
+    search_min: int | None,
+    search_max: int | None,
+    resume: bool,
+    overwrite: bool,
+    reuse_server: bool,
+    check: bool,
 ) -> None:
     """Launch an API server, run benchmark scenarios, and save results."""
     setup_logger("WARNING" if check else "INFO")  # --check prints only the plan
     if resume and overwrite:
         raise click.UsageError("--resume and --overwrite are mutually exclusive")
     try:
-        benchmark = load_preset(preset)
+        benchmark = with_search_range(load_preset(preset), search_min, search_max)
         server = apply_server_overrides(load_server(server_config, default_env=Path(sys.prefix)), benchmark.server)
     except ValueError as e:
         raise click.UsageError(str(e)) from None
 
     if check:
-        _print_check(server, len(benchmark.points))
+        _print_check(server, benchmark)
         return
 
     logger.info(f"Starting furiosa-perf: {server.backend} serving {server.model} on devices {server.devices}")
@@ -82,13 +108,20 @@ def run(
     logger.info("Benchmarking completed.")
 
 
-def _print_check(server: Server, num_points: int) -> None:
+def _print_check(server: Server, preset: Preset) -> None:
     """Print what ``run`` would launch, for validating configs in scripts and CI."""
     argv, env = server_command(server)
     if "CUDA_VISIBLE_DEVICES" in env:
         click.echo(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']} \\")
     click.echo(shlex.join(argv))
-    click.echo(f"{num_points} points")
+    search = preset.search
+    if search is None:
+        click.echo(f"{len(preset.points)} points")
+    else:
+        click.echo(
+            f"capacity search over {search.key} {search.min}..{search.max} (step {search.step}): "
+            f"at most {max_probes(search.min, search.max, search.step)} points"
+        )
     if not server.executable.exists():
         click.echo(f"warning: {server.executable} does not exist on this host", err=True)
 

@@ -68,6 +68,8 @@ def test_every_bundled_preset_loads(path: Path) -> None:
     assert loaded.points
     if loaded.kind == "baseline":
         assert all("random-input-len" in p and isinstance(p["max-concurrency"], int) for p in loaded.points)
+    elif loaded.search is not None:
+        assert len(loaded.points) == 1 and loaded.search.key not in loaded.points[0]
     else:
         assert all(isinstance(p["concurrency"], int) for p in loaded.points)
 

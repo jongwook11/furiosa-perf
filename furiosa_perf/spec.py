@@ -263,6 +263,55 @@ CLIENTS = tuple(MANAGED_CLIENT_ARGS)
 KINDS = ("baseline", "simulation")
 # Service-level objectives a preset may set; each limits one latency percentile.
 SLO_KEYS = ("ttft_p95_ms", "tpot_p95_ms")
+# Load options a capacity search may vary.
+SEARCH_KEYS = ("concurrency",)
+
+
+@dataclass(frozen=True)
+class Search:
+    """Capacity search: bisect one load option for the largest value meeting the SLO.
+
+    Attributes:
+        key: Load option searched, e.g. ``concurrency`` (users).
+        min: Smallest value tried; expected to meet the SLO.
+        max: Largest value tried; expected to miss it.
+        step: Resolution: stop when the passing and failing values are this close.
+    """
+
+    key: str
+    min: int
+    max: int
+    step: int = 1
+
+
+def parse_search(raw: dict[str, Any]) -> Search:
+    """Validate a ``search`` mapping.
+
+    Args:
+        raw: ``{key, min, max, step}``; ``step`` defaults to 1.
+
+    Returns:
+        The search.
+
+    Raises:
+        ValueError: If a key is unknown, a bound is not a positive integer, or ``min >= max``.
+    """
+    unknown = set(raw) - {"key", "min", "max", "step"}
+    if unknown:
+        raise ValueError(f"the search keys {sorted(unknown)} are unknown; use key, min, max and step")
+    if raw.get("key") not in SEARCH_KEYS:
+        raise ValueError(f"the search key '{raw.get('key')}' is unsupported; use one of {', '.join(SEARCH_KEYS)}")
+    values: dict[str, int] = {}
+    for name in ("min", "max", "step"):
+        value = raw.get(name, 1 if name == "step" else None)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"the search {name} '{value}' is invalid; use a positive integer")
+        values[name] = value
+    if values["min"] >= values["max"]:
+        raise ValueError(f"the search range {values['min']}..{values['max']} is empty; min should be below max")
+    return Search(key=str(raw["key"]), min=values["min"], max=values["max"], step=values["step"])
+
+
 # Requests per point when the preset does not say: enough for every concurrent slot
 # to be refilled twice after the first wave.
 PROMPTS_PER_CONCURRENCY = 3
@@ -280,6 +329,8 @@ class Preset:
         points: One mapping of client options per measurement point, already expanded.
         slo: Latency limits a point must meet to count towards capacity, e.g.
             ``{"ttft_p95_ms": 3000, "tpot_p95_ms": 50}``; empty for no SLO.
+        search: Capacity search replacing a fixed list of load values; ``points``
+            then holds the single base point the searched value is added to.
     """
 
     kind: str
@@ -288,6 +339,7 @@ class Preset:
     server: dict[str, Any]
     points: list[dict[str, Any]]
     slo: dict[str, float] = field(default_factory=dict)
+    search: Search | None = None
 
 
 def _kebab(mapping: dict[str, Any]) -> dict[str, Any]:
@@ -335,10 +387,10 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         ValueError: If a key is missing or unknown, or ``args``/``matrix`` set an
             option furiosa-perf manages.
     """
-    unknown = set(raw) - {"kind", "task", "client", "server", "args", "matrix", "slo"}
+    unknown = set(raw) - {"kind", "task", "client", "server", "args", "matrix", "slo", "search"}
     if unknown:
         raise ValueError(
-            f"the preset keys {sorted(unknown)} are unknown; use kind, task, client, server, args, matrix and slo"
+            f"the preset keys {sorted(unknown)} are unknown; use kind, task, client, server, args, matrix, slo and search"
         )
     for key in ("kind", "task", "client"):
         if not raw.get(key):
@@ -354,6 +406,14 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         raise ValueError(f"the SLO keys {sorted(unknown_slo)} are unknown; use {', '.join(SLO_KEYS)}")
 
     points = expand_matrix(_kebab(raw.get("args") or {}), raw.get("matrix") or [])
+    search = parse_search(raw["search"]) if raw.get("search") else None
+    if search is not None:
+        if not slo:
+            raise ValueError("a capacity search needs an 'slo' to decide which points pass")
+        if len(points) != 1 or search.key in points[0]:
+            raise ValueError(
+                f"with 'search', args and matrix should describe one point without '{search.key}', which the search sets"
+            )
     managed = sorted({key for point in points for key in point if key in MANAGED_CLIENT_ARGS[raw["client"]]})
     if managed:
         raise ValueError(f"the client options {managed} are not allowed; furiosa-perf sets them from the server config")
@@ -364,7 +424,36 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         server=_kebab(raw.get("server") or {}),
         points=points,
         slo={key: float(value) for key, value in slo.items()},
+        search=search,
     )
+
+
+def with_search_range(preset: Preset, minimum: int | None, maximum: int | None) -> Preset:
+    """``preset`` with its capacity-search range replaced where a bound is given.
+
+    Args:
+        preset: Loaded preset.
+        minimum: New lower end, or ``None`` to keep the preset's.
+        maximum: New upper end, or ``None`` to keep the preset's.
+
+    Returns:
+        The preset, unchanged when neither bound is given.
+
+    Raises:
+        ValueError: If a bound is given for a preset without ``search``, or the range is empty.
+    """
+    if minimum is None and maximum is None:
+        return preset
+    if preset.search is None:
+        raise ValueError("--search-min/--search-max need a preset with a 'search' block")
+    search = replace(
+        preset.search,
+        min=minimum if minimum is not None else preset.search.min,
+        max=maximum if maximum is not None else preset.search.max,
+    )
+    if search.min >= search.max:
+        raise ValueError(f"the search range {search.min}..{search.max} is empty; min should be below max")
+    return replace(preset, search=search)
 
 
 PRESETS_DIR = Path(__file__).parent / "presets"

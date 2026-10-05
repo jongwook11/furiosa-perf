@@ -4,8 +4,9 @@
 # a context of their own, then several turns separated by think time. Each turn
 # carries the conversation so far, including the replies the server generated, so
 # the prefix cache is exercised as in a real chat service. A point's `concurrency`
-# is the number of users talking at once; the run reports the most users whose
-# point met the SLO.
+# is the number of users talking at once; a bisection finds the most users whose
+# point meets the SLO. To sweep fixed user counts instead, replace `search` with
+# `matrix: [{concurrency: [8, 16, 32, ...]}]`.
 kind: simulation
 task: chat
 client: aiperf
@@ -42,6 +43,10 @@ args:
   benchmark-grace-period: 60
   random-seed: 0
 
-# One point per user count.
-matrix:
-  - {concurrency: [8, 16, 32, 64, 128, 256]}
+# Bisect the number of users talking at once for the most that meets the SLO.
+# min should pass and max should fail; override them per run with --search-min/--search-max.
+search:
+  key: concurrency
+  min: 8
+  max: 256
+  step: 4  # stop when the passing and failing user counts are 4 apart
