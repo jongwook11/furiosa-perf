@@ -34,6 +34,7 @@ slo:
 args:
   endpoint-type: chat
   streaming: true
+  extra-inputs: {ignore_eos: true}  # replies have the trace's output length; synthetic blocks give the model no natural end
   trace-duration: 600  # wall-clock seconds per point; slower points replay a shorter slice
   benchmark-grace-period: 120
   random-seed: 0
