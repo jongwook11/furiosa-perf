@@ -267,7 +267,7 @@ SLO_KEYS = ("ttft_p95_ms", "tpot_p95_ms")
 # speed of a request trace in percent of its recorded speed.
 SEARCH_KEYS = ("concurrency", "trace-speed-pct")
 # Point options furiosa-perf itself consumes when replaying a trace (not passed to the client).
-TRACE_POINT_KEYS = ("trace-speed-pct", "trace-duration")
+TRACE_POINT_KEYS = ("trace-speed-pct", "trace-duration", "trace-start", "trace-warmup")
 # When the server is restarted: "never" (one server for the run) or "per-point"
 # (a fresh server before every point, so no point inherits another's cache or state).
 RESTART_POLICIES = ("never", "per-point")

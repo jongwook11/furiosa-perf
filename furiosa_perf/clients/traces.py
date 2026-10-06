@@ -8,7 +8,13 @@ hit the server's prefix cache the same way, without any original text.
 
 A point replays the trace at a fraction of its recorded speed: timestamps are
 stretched by ``100 / speed_pct``. To keep every point about as long, a point uses
-only the start of the trace that fits its wall-clock duration at that speed.
+only the part of the trace, from a chosen start, that fits its wall-clock duration
+at that speed.
+
+A trace starts with an empty cache, unlike a service that has been running. So a
+point can start mid-trace and first warm the cache with the requests recorded just
+before its start; their prompts fill the prefix cache as the service's history
+would have.
 """
 
 import hashlib
@@ -66,28 +72,41 @@ class TraceWindow:
 
     Attributes:
         speed_pct: Replay speed in percent of the recorded speed.
-        trace_seconds: Recorded time covered, from the first request.
+        start_seconds: Recorded time, from the trace's first request, where the slice starts.
+        trace_seconds: Recorded time covered, from ``start_seconds``.
         requests: Requests replayed.
         dropped_too_long: Requests in that window left out because input plus output
             exceeds the server's maximum length.
         offered_req_per_s: Mean request rate offered to the server.
+        warmup_requests: Requests recorded before the slice, sent first to warm the cache.
     """
 
     speed_pct: int
+    start_seconds: float
     trace_seconds: float
     requests: int
     dropped_too_long: int
     offered_req_per_s: float
+    warmup_requests: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """The window as plain data for ``record.json``."""
         return asdict(self)
 
 
+def _fits(row: dict[str, Any], max_total_tokens: int | None) -> bool:
+    """Whether a request's input plus output fits the server's maximum length."""
+    return max_total_tokens is None or row["input_length"] + row["output_length"] <= max_total_tokens
+
+
 def scale_trace(
-    rows: list[dict[str, Any]], speed_pct: int, wall_seconds: float, max_total_tokens: int | None
+    rows: list[dict[str, Any]],
+    speed_pct: int,
+    wall_seconds: float,
+    max_total_tokens: int | None,
+    start_seconds: float = 0.0,
 ) -> tuple[list[dict[str, Any]], TraceWindow]:
-    """Cut the start of a trace that lasts ``wall_seconds`` at ``speed_pct`` and stretch its timestamps.
+    """Cut the part of a trace that lasts ``wall_seconds`` at ``speed_pct`` and stretch its timestamps.
 
     Args:
         rows: Trace requests sorted by ``timestamp`` (ms from the trace start).
@@ -95,25 +114,45 @@ def scale_trace(
         wall_seconds: How long the replay should last.
         max_total_tokens: Drop requests whose input plus output exceeds this
             (the server's maximum length); ``None`` keeps all.
+        start_seconds: Recorded time, from the first request, where the slice starts.
 
     Returns:
         The requests to replay, with timestamps rebased to 0 and stretched, and a
         description of the window.
     """
-    start = rows[0]["timestamp"] if rows else 0
+    start = (rows[0]["timestamp"] if rows else 0) + start_seconds * 1000
     trace_ms = wall_seconds * 1000 * speed_pct / 100
-    window = [r for r in rows if r["timestamp"] - start <= trace_ms]
-    kept = [r for r in window if max_total_tokens is None or r["input_length"] + r["output_length"] <= max_total_tokens]
+    window = [r for r in rows if 0 <= r["timestamp"] - start <= trace_ms]
+    kept = [r for r in window if _fits(r, max_total_tokens)]
     stretch = 100 / speed_pct
     scaled = [{**r, "timestamp": round((r["timestamp"] - start) * stretch)} for r in kept]
     info = TraceWindow(
         speed_pct=speed_pct,
+        start_seconds=start_seconds,
         trace_seconds=round(trace_ms / 1000, 1),
         requests=len(scaled),
         dropped_too_long=len(window) - len(kept),
         offered_req_per_s=round(len(scaled) / wall_seconds, 3) if wall_seconds > 0 else 0.0,
     )
     return scaled, info
+
+
+def warmup_rows(
+    rows: list[dict[str, Any]], start_seconds: float, warmup_seconds: float, max_total_tokens: int | None
+) -> list[dict[str, Any]]:
+    """The requests recorded in the ``warmup_seconds`` before ``start_seconds``, to fill the cache.
+
+    They keep their recorded spacing (full speed: the server queues what it cannot
+    take at once, and only the resulting cache matters) and ask for one output
+    token, since only their prompts are cached.
+
+    Returns:
+        The warm-up requests, timestamps rebased to 0.
+    """
+    start = (rows[0]["timestamp"] if rows else 0) + start_seconds * 1000
+    begin = start - warmup_seconds * 1000
+    window = [r for r in rows if begin <= r["timestamp"] < start and _fits(r, max_total_tokens)]
+    return [{**r, "timestamp": round(r["timestamp"] - begin), "output_length": 1} for r in window]
 
 
 def load_trace(path: Path) -> list[dict[str, Any]]:

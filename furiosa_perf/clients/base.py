@@ -162,6 +162,12 @@ class BenchmarkClient:
         """One summary row with the same keys for every point, invalid ones included."""
         raise NotImplementedError
 
+    def warm_up(self, point: dict[str, Any], point_dir: Path) -> None:
+        """Bring the server into the state a point is measured in; nothing by default.
+
+        Runs after :meth:`command` and outside the monitor's window.
+        """
+
     def concurrency(self, point: dict[str, Any]) -> int:
         """Concurrency of a point, for the monitor's steady-state cut."""
         return 0
@@ -280,26 +286,11 @@ class BenchmarkClient:
         point_dir = self.point_dir(name)
         self.clear_result(point_dir)
         command = self.command(point, point_dir)
-        logger.info(f"Executing: {' '.join(command)}")
+        self.warm_up(point, point_dir)
 
         started = datetime.now(timezone.utc).isoformat()
         window = monitor.begin(name) if monitor is not None else None
-        with (point_dir / CLIENT_LOG).open("w") as log:
-            self.process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                cwd=point_dir,
-                bufsize=1,
-                start_new_session=True,
-            )
-            assert self.process.stdout is not None, "stdout should be a pipe"
-            for line in self.process.stdout:
-                log.write(line)
-                logger.info(line.rstrip())
-            returncode = self.process.wait()
-        self.process = None
+        returncode = self.run_logged(command, point_dir, point_dir / CLIENT_LOG)
 
         result = self.read_result(point_dir)
         row = self.summary_row(point, result, self.judge(point, result, returncode))
@@ -318,6 +309,27 @@ class BenchmarkClient:
         write_json(point_dir / RECORD_FILE, record)
         logger.info(f"Parsed result: {row}")
         return row
+
+    def run_logged(self, command: list[str], cwd: Path, log_path: Path) -> int:
+        """Run a client command, copying its output to ``log_path`` and the log; return its exit code."""
+        logger.info(f"Executing: {' '.join(command)}")
+        with log_path.open("w") as log:
+            self.process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=cwd,
+                bufsize=1,
+                start_new_session=True,
+            )
+            assert self.process.stdout is not None, "stdout should be a pipe"
+            for line in self.process.stdout:
+                log.write(line)
+                logger.info(line.rstrip())
+            returncode = self.process.wait()
+        self.process = None
+        return returncode
 
     def finish_info(self, desc: str = "") -> None:
         """Write the Markdown and CSV summary files, overall and per :meth:`group_key`.

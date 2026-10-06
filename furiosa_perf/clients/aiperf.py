@@ -11,8 +11,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from furiosa_perf.clients.base import BenchmarkClient
-from furiosa_perf.clients.traces import TraceWindow, fetch_trace, load_trace, scale_trace, write_trace
+from furiosa_perf.clients.base import CLIENT_LOG, BenchmarkClient
+from furiosa_perf.clients.traces import TraceWindow, fetch_trace, load_trace, scale_trace, warmup_rows, write_trace
 from furiosa_perf.log import logger
 from furiosa_perf.results.store import point_name
 from furiosa_perf.runner.server import option_args
@@ -31,6 +31,10 @@ LATENCY_STATS = ("avg", "p50", "p90", "p95", "p99")
 # Trace replay: file written per point, and wall-clock seconds a point lasts by default.
 POINT_TRACE_FILE = "trace.jsonl"
 DEFAULT_TRACE_DURATION_S = 600
+# Directory, inside a point's, of the cache warm-up run.
+WARMUP_DIR = "warmup"
+# Point options that bound the measured run only; the warm-up runs to completion.
+MEASURE_ONLY_KEYS = ("benchmark-duration", "benchmark-grace-period", "goodput")
 
 
 def metric(result: dict[str, Any] | None, name: str, stat: str = "avg") -> float | None:
@@ -143,6 +147,8 @@ class AiperfClient(BenchmarkClient):
         super().__init__(*args, **kwargs)
         self._trace_rows: list[dict[str, Any]] | None = None
         self._windows: dict[str, TraceWindow] = {}
+        # Timestamp (ms) in a point's trace file where its measured requests start.
+        self._measure_offsets: dict[str, int] = {}
 
     def command(self, point: dict[str, Any], point_dir: Path) -> list[str]:
         """``aiperf profile`` command line for one point.
@@ -150,19 +156,17 @@ class AiperfClient(BenchmarkClient):
         The preset's SLO is also passed as ``--goodput`` (per-request thresholds) unless
         the point sets ``goodput`` itself. With a preset ``trace`` the point's slice
         of it is written to ``point_dir`` first and replayed at its recorded
-        (stretched) timestamps.
+        (stretched) timestamps; requests before ``--fixed-schedule-start-offset``
+        are the cache warm-up, sent by :meth:`warm_up`.
         """
-        command = [str(self.env / "bin" / "aiperf") if self.env else "aiperf", "profile"]
-        command += ["--model", self.model, "--url", f"http://{self.host}:{self.port}"]
-        command += ["--artifact-dir", str(point_dir), "--ui-type", "none"]
-        if "tokenizer" not in point:
-            command += ["--tokenizer", self.tokenizer]
+        command = self._base_command(point, point_dir)
         if self.preset.slo and "goodput" not in point:
             command += ["--goodput", " ".join(f"{SLO_METRICS[k][0]}:{v}" for k, v in self.preset.slo.items())]
         if self.preset.trace:
-            trace_file = self._write_point_trace(point, point_dir)
-            command += ["--custom-dataset-type", "mooncake_trace", "--input-file", str(trace_file)]
-            command += ["--fixed-schedule"]  # send at the trace timestamps (already rebased to 0)
+            self._write_point_trace(point, point_dir)
+            offset = self._measure_offsets[point_name(point)]
+            if offset:
+                command += ["--fixed-schedule-start-offset", str(offset)]  # also the schedule's time zero
             if "benchmark-duration" not in point:
                 # Stop at the end of the slice; the grace period then bounds the wait for late
                 # replies, so an overloaded point cannot run on indefinitely.
@@ -173,23 +177,65 @@ class AiperfClient(BenchmarkClient):
                 command += option_args(key, value)
         return command
 
-    def _write_point_trace(self, point: dict[str, Any], point_dir: Path) -> Path:
-        """Write the point's slice of the preset trace, stretched to its replay speed."""
+    def warm_up(self, point: dict[str, Any], point_dir: Path) -> None:
+        """Send a trace point's warm-up requests and wait for them, so the measured run starts on a warm cache.
+
+        It replays the start of the same trace file as the measured run: AIPerf derives
+        each hash id's block from the file's content and the random seed, so only the
+        same file gives the measured requests the blocks the warm-up cached.
+
+        Raises:
+            RuntimeError: If the warm-up run fails; the point would be measured cold.
+        """
+        offset = self._measure_offsets.get(point_name(point), 0)
+        if not offset:
+            return
+        warmup_dir = point_dir / WARMUP_DIR
+        warmup_dir.mkdir(exist_ok=True)
+        command = self._base_command(point, warmup_dir, trace_file=point_dir / POINT_TRACE_FILE)
+        command += ["--fixed-schedule-end-offset", str(offset - 1)]
+        for key, value in point.items():
+            if key not in TRACE_POINT_KEYS and key not in MEASURE_ONLY_KEYS:
+                command += option_args(key, value)
+        returncode = self.run_logged(command, warmup_dir, warmup_dir / CLIENT_LOG)
+        if returncode != 0:
+            raise RuntimeError(f"the cache warm-up exited with code {returncode}, see {warmup_dir / CLIENT_LOG}")
+
+    def _base_command(self, point: dict[str, Any], artifact_dir: Path, trace_file: Path | None = None) -> list[str]:
+        """``aiperf profile`` with the target, artifact directory and, for a trace, its fixed-schedule replay."""
+        command = [str(self.env / "bin" / "aiperf") if self.env else "aiperf", "profile"]
+        command += ["--model", self.model, "--url", f"http://{self.host}:{self.port}"]
+        command += ["--artifact-dir", str(artifact_dir), "--ui-type", "none"]
+        if "tokenizer" not in point:
+            command += ["--tokenizer", self.tokenizer]
+        if self.preset.trace:
+            trace_file = trace_file or artifact_dir / POINT_TRACE_FILE
+            command += ["--custom-dataset-type", "mooncake_trace", "--input-file", str(trace_file)]
+            command += ["--fixed-schedule"]  # send at the trace timestamps
+        return command
+
+    def _write_point_trace(self, point: dict[str, Any], point_dir: Path) -> None:
+        """Write the point's trace file: warm-up requests first, then its slice stretched to its replay speed."""
         trace = self.preset.trace
         if self._trace_rows is None:
             self._trace_rows = load_trace(fetch_trace(str(trace["source"]), str(trace["sha256"])))
         max_total = trace.get("max-total-tokens") or self.preset.server.get("max-model-len")
+        max_total = int(max_total) if max_total else None
+        start = float(point.get("trace-start", 0))
         rows, window = scale_trace(
             self._trace_rows,
             int(point["trace-speed-pct"]),
             float(point.get("trace-duration", DEFAULT_TRACE_DURATION_S)),
-            int(max_total) if max_total else None,
+            max_total,
+            start_seconds=start,
         )
-        path = point_dir / POINT_TRACE_FILE
-        write_trace(rows, path)
+        warmup = warmup_rows(self._trace_rows, start, float(point.get("trace-warmup", 0)), max_total)
+        offset = warmup[-1]["timestamp"] + 1 if warmup else 0
+        write_trace(warmup + [{**r, "timestamp": r["timestamp"] + offset} for r in rows], point_dir / POINT_TRACE_FILE)
+        window.warmup_requests = len(warmup)
         self._windows[point_name(point)] = window
+        self._measure_offsets[point_name(point)] = offset
         logger.info(f"Trace slice for {point_name(point)}: {window}")
-        return path
 
     def read_result(self, point_dir: Path) -> dict[str, Any] | None:
         """AIPerf's JSON export of a point."""
@@ -215,6 +261,7 @@ class AiperfClient(BenchmarkClient):
                 "Offered(req/s)": window.offered_req_per_s if window else None,
                 "Trace Requests": window.requests if window else None,
                 "Dropped Too Long": window.dropped_too_long if window else None,
+                "Warm-up Requests": window.warmup_requests if window else None,
                 **row,
             }
         return row
