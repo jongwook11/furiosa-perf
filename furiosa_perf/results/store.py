@@ -27,7 +27,13 @@ SERVER_LOG = "server.log"
 
 
 # Load options of service-simulation points (AIPerf) -> name prefix.
-SIMULATION_LOAD_PREFIXES = {"concurrency": "u", "user-centric-rate": "ucr", "num-users": "n", "request-rate": "r"}
+SIMULATION_LOAD_PREFIXES = {
+    "concurrency": "u",
+    "user-centric-rate": "ucr",
+    "num-users": "n",
+    "request-rate": "r",
+    "trace-speed-pct": "s",
+}
 
 
 def point_name(point: dict[str, Any]) -> str:

@@ -263,8 +263,11 @@ CLIENTS = tuple(MANAGED_CLIENT_ARGS)
 KINDS = ("baseline", "simulation")
 # Service-level objectives a preset may set; each limits one latency percentile.
 SLO_KEYS = ("ttft_p95_ms", "tpot_p95_ms")
-# Load options a capacity search may vary.
-SEARCH_KEYS = ("concurrency",)
+# Load options a capacity search may vary: users talking at once, or the replay
+# speed of a request trace in percent of its recorded speed.
+SEARCH_KEYS = ("concurrency", "trace-speed-pct")
+# Point options furiosa-perf itself consumes when replaying a trace (not passed to the client).
+TRACE_POINT_KEYS = ("trace-speed-pct", "trace-duration")
 # When the server is restarted: "never" (one server for the run) or "per-point"
 # (a fresh server before every point, so no point inherits another's cache or state).
 RESTART_POLICIES = ("never", "per-point")
@@ -335,6 +338,8 @@ class Preset:
         search: Capacity search replacing a fixed list of load values; ``points``
             then holds the single base point the searched value is added to.
         restart_server: ``"never"`` or ``"per-point"``, see :data:`RESTART_POLICIES`.
+        trace: Request trace replayed instead of synthetic traffic: ``source`` (URL or
+            path), ``sha256``, ``license``, and optionally ``max-total-tokens``.
     """
 
     kind: str
@@ -345,6 +350,7 @@ class Preset:
     slo: dict[str, float] = field(default_factory=dict)
     search: Search | None = None
     restart_server: str = "never"
+    trace: dict[str, Any] = field(default_factory=dict)
 
 
 def _kebab(mapping: dict[str, Any]) -> dict[str, Any]:
@@ -392,7 +398,7 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         ValueError: If a key is missing or unknown, or ``args``/``matrix`` set an
             option furiosa-perf manages.
     """
-    known = ("kind", "task", "client", "server", "restart-server", "args", "matrix", "slo", "search")
+    known = ("kind", "task", "client", "server", "restart-server", "trace", "args", "matrix", "slo", "search")
     unknown = set(raw) - set(known)
     if unknown:
         raise ValueError(f"the preset keys {sorted(unknown)} are unknown; use {', '.join(known)}")
@@ -421,6 +427,13 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
             raise ValueError(
                 f"with 'search', args and matrix should describe one point without '{search.key}', which the search sets"
             )
+    trace = _kebab(raw.get("trace") or {})
+    if trace:
+        missing = [key for key in ("source", "sha256") if not trace.get(key)]
+        if missing:
+            raise ValueError(f"the preset trace is missing {missing}; give its source and expected sha256")
+        if raw["client"] != "aiperf":
+            raise ValueError("a trace is replayed with the aiperf client; set 'client: aiperf'")
     managed = sorted({key for point in points for key in point if key in MANAGED_CLIENT_ARGS[raw["client"]]})
     if managed:
         raise ValueError(f"the client options {managed} are not allowed; furiosa-perf sets them from the server config")
@@ -433,6 +446,7 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         slo={key: float(value) for key, value in slo.items()},
         search=search,
         restart_server=str(restart),
+        trace=trace,
     )
 
 

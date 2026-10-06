@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from furiosa_perf.clients.base import BenchmarkClient
+from furiosa_perf.clients.traces import TraceWindow, fetch_trace, load_trace, scale_trace, write_trace
+from furiosa_perf.log import logger
+from furiosa_perf.results.store import point_name
 from furiosa_perf.runner.server import option_args
+from furiosa_perf.spec import TRACE_POINT_KEYS
 
 AIPERF_VERSION = "0.13.0"
 RESULT_FILE = "profile_export_aiperf.json"
@@ -24,6 +28,9 @@ MAX_ERROR_RATE_PCT = 5.0
 # Preset SLO key -> (AIPerf metric, statistic) it limits.
 SLO_METRICS = {"ttft_p95_ms": ("time_to_first_token", "p95"), "tpot_p95_ms": ("inter_token_latency", "p95")}
 LATENCY_STATS = ("avg", "p50", "p90", "p95", "p99")
+# Trace replay: file written per point, and wall-clock seconds a point lasts by default.
+POINT_TRACE_FILE = "trace.jsonl"
+DEFAULT_TRACE_DURATION_S = 600
 
 
 def metric(result: dict[str, Any] | None, name: str, stat: str = "avg") -> float | None:
@@ -103,33 +110,47 @@ def summary_row(
     return row
 
 
-def max_users_within_slo(rows: list[dict[str, Any]]) -> int | None:
-    """Largest user count whose point is valid and meets the SLO, ``None`` if none does.
+def max_load_within_slo(rows: list[dict[str, Any]], column: str = "Users") -> float | None:
+    """Largest load (``column``) whose point is valid and meets the SLO, ``None`` if none does.
 
-    Points above the first one that misses the SLO are ignored: a higher count
+    Points above the first one that misses the SLO are ignored: a higher load
     passing again after a failure is noise, not capacity.
     """
     best = None
-    for row in sorted(rows, key=lambda r: r["Users"] or 0):
+    for row in sorted((r for r in rows if r.get(column) is not None), key=lambda r: r[column]):
         if not row["ok"] or not row["slo_met"]:
             break
-        best = row["Users"]
+        best = row[column]
     return best
 
 
+# Kept for callers that ask about users specifically.
+def max_users_within_slo(rows: list[dict[str, Any]]) -> float | None:
+    """Largest user count whose point is valid and meets the SLO, see :func:`max_load_within_slo`."""
+    return max_load_within_slo(rows, "Users")
+
+
 class AiperfClient(BenchmarkClient):
-    """``aiperf profile``: service-simulation points such as multi-turn chat."""
+    """``aiperf profile``: service-simulation points such as multi-turn chat or a trace replay."""
 
     NAME = "aiperf"
     PACKAGE = "aiperf"
     VERSION = AIPERF_VERSION
     EXECUTABLE = "aiperf"
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """See :class:`BenchmarkClient`; adds the trace loaded on first use and the slices replayed."""
+        super().__init__(*args, **kwargs)
+        self._trace_rows: list[dict[str, Any]] | None = None
+        self._windows: dict[str, TraceWindow] = {}
+
     def command(self, point: dict[str, Any], point_dir: Path) -> list[str]:
         """``aiperf profile`` command line for one point.
 
         The preset's SLO is also passed as ``--goodput`` (per-request thresholds) unless
-        the point sets ``goodput`` itself.
+        the point sets ``goodput`` itself. With a preset ``trace`` the point's slice
+        of it is written to ``point_dir`` first and replayed at its recorded
+        (stretched) timestamps.
         """
         command = [str(self.env / "bin" / "aiperf") if self.env else "aiperf", "profile"]
         command += ["--model", self.model, "--url", f"http://{self.host}:{self.port}"]
@@ -138,9 +159,37 @@ class AiperfClient(BenchmarkClient):
             command += ["--tokenizer", self.tokenizer]
         if self.preset.slo and "goodput" not in point:
             command += ["--goodput", " ".join(f"{SLO_METRICS[k][0]}:{v}" for k, v in self.preset.slo.items())]
+        if self.preset.trace:
+            trace_file = self._write_point_trace(point, point_dir)
+            command += ["--custom-dataset-type", "mooncake_trace", "--input-file", str(trace_file)]
+            command += ["--fixed-schedule"]  # send at the trace timestamps (already rebased to 0)
+            if "benchmark-duration" not in point:
+                # Stop at the end of the slice; the grace period then bounds the wait for late
+                # replies, so an overloaded point cannot run on indefinitely.
+                duration = point.get("trace-duration", DEFAULT_TRACE_DURATION_S)
+                command += ["--benchmark-duration", str(duration)]
         for key, value in point.items():
-            command += option_args(key, value)
+            if key not in TRACE_POINT_KEYS:
+                command += option_args(key, value)
         return command
+
+    def _write_point_trace(self, point: dict[str, Any], point_dir: Path) -> Path:
+        """Write the point's slice of the preset trace, stretched to its replay speed."""
+        trace = self.preset.trace
+        if self._trace_rows is None:
+            self._trace_rows = load_trace(fetch_trace(str(trace["source"]), str(trace["sha256"])))
+        max_total = trace.get("max-total-tokens") or self.preset.server.get("max-model-len")
+        rows, window = scale_trace(
+            self._trace_rows,
+            int(point["trace-speed-pct"]),
+            float(point.get("trace-duration", DEFAULT_TRACE_DURATION_S)),
+            int(max_total) if max_total else None,
+        )
+        path = point_dir / POINT_TRACE_FILE
+        write_trace(rows, path)
+        self._windows[point_name(point)] = window
+        logger.info(f"Trace slice for {point_name(point)}: {window}")
+        return path
 
     def read_result(self, point_dir: Path) -> dict[str, Any] | None:
         """AIPerf's JSON export of a point."""
@@ -157,25 +206,42 @@ class AiperfClient(BenchmarkClient):
         return judge(point, result, returncode)
 
     def summary_row(self, point: dict[str, Any], result: dict[str, Any] | None, fail_reason: str) -> dict[str, Any]:
-        """See :func:`summary_row`."""
-        return summary_row(point, result, fail_reason, self.preset.slo)
-
-    def concurrency(self, point: dict[str, Any]) -> int:
-        """Users of the point (``concurrency``)."""
-        return int(point.get("concurrency") or 0)
+        """See :func:`summary_row`; trace points also say which slice of the trace they replayed."""
+        row = summary_row(point, result, fail_reason, self.preset.slo)
+        if self.preset.trace:
+            window = self._windows.get(point_name(point))
+            row = {
+                "Trace Speed(%)": point.get("trace-speed-pct"),
+                "Offered(req/s)": window.offered_req_per_s if window else None,
+                "Trace Requests": window.requests if window else None,
+                "Dropped Too Long": window.dropped_too_long if window else None,
+                **row,
+            }
+        return row
 
     def passes(self, row: dict[str, Any]) -> bool:
         """A point passes when it is valid and meets the SLO."""
         return bool(row["ok"]) and row["slo_met"] is True
 
     def run_summary(self) -> dict[str, Any]:
-        """``capacity``: the SLO, the most users that met it and, after a search, how it was found."""
+        """``capacity``: the SLO, the highest load that met it and, after a search, how it was found.
+
+        The load is ``max_users`` for chat sessions, or ``max_speed_pct`` (percent of the
+        recorded speed) for a trace replay, which also records the trace it replayed.
+        """
         if not self.preset.slo:
             return {}
-        capacity: dict[str, Any] = {
-            "slo": self.preset.slo,
-            "max_users": max_users_within_slo(self.total_results["results"]),
-        }
+        rows = self.total_results["results"]
+        capacity: dict[str, Any] = {"slo": self.preset.slo}
+        if self.preset.trace:
+            capacity["max_speed_pct"] = max_load_within_slo(rows, "Trace Speed(%)")
+            capacity["trace"] = dict(self.preset.trace)
+        else:
+            capacity["max_users"] = max_load_within_slo(rows, "Users")
         if self.search_outcome is not None:
             capacity["search"] = self.search_outcome.to_dict()
         return {"capacity": capacity}
+
+    def concurrency(self, point: dict[str, Any]) -> int:
+        """Users of the point (``concurrency``); 0 for a trace replay, which has no fixed concurrency."""
+        return int(point.get("concurrency") or 0)

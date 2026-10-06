@@ -214,6 +214,7 @@ A preset says what to measure: which client, which server options the measuremen
 | `baseline/embedding` | Embeddings, 256 to 32k input tokens |
 | `baseline/rerank` | Reranking, 5 documents per query, 256 to 8k tokens |
 | `simulation/chat-synthetic` | General chatbot: multi-turn synthetic conversations, capacity search over 8 to 256 users, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
+| `simulation/chat-mooncake` | Production chatbot trace (Kimi, Mooncake FAST'25 conversation trace) replayed at its recorded times, capacity search over 5 to 100 % of its recorded speed, same SLO |
 
 The bundled files are in [`furiosa_perf/presets/`](furiosa_perf/presets); copy one to change the points. The format:
 
@@ -257,6 +258,8 @@ search:
 `restart-server: per-point` (set in `simulation/chat-synthetic`) launches a fresh server before every measured point, so no point inherits the previous one's prefix cache, queue or load; the preset's AIPerf warm-up (`warmup-request-count`) then primes the new server outside the measurement. The default, `never`, keeps one server for the whole run, as the baseline presets do.
 
 Both ends are measured first; if `min` already misses the SLO or `max` still meets it, the run says so (`bound: below_min` / `at_least_max`) instead of searching. Otherwise each probe halves the range, so 8..256 with step 4 takes at most 8 points. Override the range per run with `--search-min` / `--search-max`; `--check` prints the plan. Passing assumes more users never improves latency, so a noisy point at the edge can move the result by about one step.
+
+**Trace replay.** A preset with a `trace:` block replays a request trace in Mooncake format (`timestamp`, `input_length`, `output_length`, `hash_ids`) instead of synthetic traffic. The trace is downloaded once to `~/.cache/furiosa-perf/datasets/` and checked against the preset's `sha256`. It holds no text: AIPerf turns every hash id into a fixed 512-token block, so requests that shared a prompt prefix in production share it again and hit the prefix cache the same way. Requests are sent at their recorded times (open loop), stretched to `trace-speed-pct` percent of the recorded speed; each point replays the start of the trace that lasts `trace-duration` seconds at that speed, and requests longer than the server's `max-model-len` are left out and counted (`Dropped Too Long`). The search key is then `trace-speed-pct`, and `run.json` reports `capacity.max_speed_pct` with the trace's source, hash and license.
 
 Each simulation summary row has `slo_met`, and `run.json` gets `capacity: {slo, max_users, search}`: the most users whose point was valid and met the SLO, and with a search its range, step, bound and every probe with its verdict. The SLO is also passed to AIPerf as `--goodput`, reported per point as `Goodput(req/s)`.
 
