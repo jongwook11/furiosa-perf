@@ -1,6 +1,6 @@
 """Per-device accelerator sampling and per-process host usage for the monitor.
 
-RNGD is read through ``furiosa_smi_py`` (needs the ``furiosa-smi`` apt package) and
+RNGD is read through the ``furiosa_smi`` Python package (furiosa-smi 2026.4 or later) and
 NVIDIA GPUs through ``nvidia-smi``. Both samplers return one :class:`DeviceSample` per
 configured device so that imbalance between the devices of one tensor-parallel group
 stays visible; the monitor also keeps their sum/mean per row.
@@ -36,10 +36,10 @@ class DeviceSample:
         ambient_c: RNGD ambient sensor.
         mem_temp_c: GPU memory temperature.
         util_pct: Compute utilization (RNGD: mean over PEs; GPU: ``utilization.gpu``).
-        mem_used_gib: GPU memory in use (RNGD preallocates at server start, so it is
-            recorded once in the scenario snapshot instead).
+        mem_used_gib: Device memory in use. RNGD preallocates nearly all of it at server
+            start, so it shows that the server holds the device rather than load.
         clock_mhz: Core clock (RNGD: mean over PEs; GPU: SM clock).
-        mem_clock_mhz: Memory clock.
+        mem_clock_mhz: GPU memory clock (RNGD does not report one).
         throttle: Active slowdown reasons as a bit mask with the idle bit removed;
             ``0`` means running at full speed.
         pcie_gen: Current PCIe generation (GPU).
@@ -64,7 +64,7 @@ DEVICE_COLUMNS = [f.name for f in fields(DeviceSample)]
 
 
 class NpuSampler:
-    """Sample the configured RNGD devices through ``furiosa_smi_py``."""
+    """Sample the configured RNGD devices through ``furiosa_smi`` (furiosa-smi 2026.4+)."""
 
     def __init__(self, indices: list[int]) -> None:
         """Open the devices.
@@ -75,18 +75,21 @@ class NpuSampler:
         Raises:
             ValueError: If an index in ``indices`` does not exist on this host.
         """
-        import furiosa_smi_py  # optional dependency, present on RNGD hosts only
+        import furiosa_smi  # optional dependency, present on RNGD hosts only
 
-        furiosa_smi_py.init()
-        devices = {int(d.device_info().index()): d for d in furiosa_smi_py.list_devices()}
+        devices = {int(d.dev_node_index()): d for d in furiosa_smi.list_devices()}
         missing = sorted(set(indices) - set(devices))
         if missing:
             raise ValueError(f"the NPU indices {missing} are invalid; detected devices are {sorted(devices)}")
         self.devices = {i: devices[i] for i in (indices or sorted(devices))}
-        self.observer = furiosa_smi_py.create_default_observer()
+        # Per-PE cycle counters of the previous sample, for utilization since then.
+        self._previous = {i: device.performance_counter() for i, device in self.devices.items()}
 
     def sample(self) -> list[DeviceSample]:
         """Read every configured device once.
+
+        Utilization is measured over the time since the previous sample from the PE
+        cycle counters, which only advance while a process holds the device.
 
         Returns:
             One sample per device, in index order.
@@ -94,18 +97,21 @@ class NpuSampler:
         samples = []
         for index, device in self.devices.items():
             temperature = device.device_temperature()
-            utilization = [pe.pe_usage_percentage() for pe in self.observer.get_core_utilization(device)]
-            clocks = [pe.frequency() for pe in device.core_frequency().pe_frequency()]
+            counters = device.performance_counter()
+            previous = self._previous[index]
+            utilization = [counters[pe].utilization_since(previous[pe]) for pe in counters if pe in previous]
+            self._previous[index] = counters
+            clocks = list(device.core_frequency().values())
             samples.append(
                 DeviceSample(
                     device=index,
                     power_w=device.power_consumption(),
                     temp_c=temperature.soc_peak(),
                     ambient_c=temperature.ambient(),
-                    util_pct=sum(utilization) / len(utilization) if utilization else None,
+                    util_pct=100.0 * sum(utilization) / len(utilization) if utilization else None,
+                    mem_used_gib=npu_memory_gib(device)[0],
                     clock_mhz=sum(clocks) / len(clocks) if clocks else None,
-                    mem_clock_mhz=device.memory_frequency().frequency(),
-                    throttle=int(device.throttle_reason()) & ~THROTTLE_IDLE_BIT,
+                    throttle=npu_throttle_mask(device.throttle_reason()),
                 )
             )
         return samples
@@ -123,17 +129,36 @@ class NpuSampler:
         """
         per_device = {}
         for index, device in self.devices.items():
-            pes = device.device_performance_counter().pe_performance_counters()
-            clocks = [pe.frequency() for pe in device.core_frequency().pe_frequency()]
-            dram = device.memory_utilization().dram().memory()
+            pes = list(device.performance_counter().values())
+            clocks = list(device.core_frequency().values())
             per_device[str(index)] = {
                 "exec_cycles": sum(pe.task_execution_cycle() for pe in pes),
                 "num_pes": len(pes),
                 "clock_mhz": sum(clocks) / len(clocks) if clocks else 0.0,
-                "dram_used_gib": round(sum(b.in_use_bytes() for b in dram) / GIB, 2),
+                "dram_used_gib": npu_memory_gib(device)[0],
                 "governor": str(device.governor_profile()),
             }
         return per_device
+
+
+def npu_memory_gib(device: Any) -> tuple[float, float]:
+    """``(in_use_gib, total_gib)`` of an RNGD's DRAM, summed over its per-PE ranges."""
+    ranges = device.memory_usage().values()
+    used = sum(r.in_use_bytes() for r in ranges)
+    total = sum(r.total_bytes() for r in ranges)
+    return round(used / GIB, 2), round(total / GIB, 2)
+
+
+def npu_throttle_mask(reasons: list[Any]) -> int:
+    """Active RNGD slowdown reasons as a bit mask, the idle bit removed.
+
+    ``furiosa_smi`` reports a list of ``ThrottleReason`` values; bit ``int(reason)``
+    is set for each (``Idle`` is 0, so it lines up with :data:`THROTTLE_IDLE_BIT`).
+    """
+    mask = 0
+    for reason in reasons:
+        mask |= 1 << int(reason)
+    return mask & ~THROTTLE_IDLE_BIT
 
 
 # nvidia-smi --query-gpu field -> DeviceSample field. Older drivers know the throttle

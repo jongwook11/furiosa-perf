@@ -69,7 +69,7 @@ pip install -e .
 Backend-specific extras:
 
 ```bash
-pip install ".[furiosa-llm]"   # Furiosa NPU
+pip install ".[rngd]"          # Furiosa NPU monitoring (furiosa-smi 2026.4+)
 pip install ".[vllm]"          # NVIDIA GPU
 ```
 
@@ -160,7 +160,7 @@ max-model-len: 32768
 
 **Choosing `devices` (Furiosa RNGD)**
 
-`devices` specifies which RNGD cards to use and how many to allocate for the model. By default all of them form one tensor-parallel replica; use `parallel` to split them differently. Larger models require more cards per replica.
+`devices` specifies which RNGD cards to use and how many to allocate for the model. By default all of them form one tensor-parallel replica; use `parallel` to split them differently (for furiosa-llm, `tp` must match the artifact, see the notes below). Larger models require more cards per replica.
 
 First, check how many RNGDs are available in your environment:
 
@@ -197,7 +197,7 @@ Furiosa AI supported models are available at [huggingface.co/furiosa-ai](https:/
 
 **Notes:**
 
-- `furiosa-llm` backend: `devices: 0,1,2,3` → `--devices npu:0,npu:1,npu:2,npu:3`, and `parallel` → `--tensor-parallel-size <tp × 8> --pipeline-parallel-size <pp> --data-parallel-size <dp>`
+- `furiosa-llm` backend (2026.4+): `devices: 0,1,2,3` → `--devices npu:0,npu:1,npu:2,npu:3`, and `parallel` → `--pipeline-parallel-size <pp> --data-parallel-size <dp>`. Tensor parallelism is fixed when the artifact is built, so `parallel.tp` must be the artifact's cards per stage (one for `furiosa-ai/Qwen3-8B-FP8`). furiosa-llm does not reject a mismatch (two cards with a one-card artifact and `dp: 1` silently use only the first card), so furiosa-perf compares the placement furiosa-llm logs with `parallel` after startup and stops on a difference.
 - `vllm` backend: `devices` sets `CUDA_VISIBLE_DEVICES`, and `parallel` → `--tensor-parallel-size <tp> --pipeline-parallel-size <pp> --data-parallel-size <dp>`
 - Results of non-default layouts get the layout in their directory name, e.g. `RNGD_4-tp2-dp2_furiosa-llm_<version>`
 
@@ -358,7 +358,7 @@ reference line, metrics) are configured in `furiosa_perf/reporting/theme.py`.
 ## Troubleshooting
 
 **Device columns in the monitoring CSV are empty**
-- NPU: requires `furiosa-smi-py` (installed by the `furiosa-llm` extra) and the `furiosa-smi` apt package it wraps.
+- NPU: requires the `furiosa_smi` Python package (`furiosa-smi` 2026.4 or later, installed by the `rngd` extra) in furiosa-perf's environment. The older `furiosa-smi-py` is no longer read.
 - GPU: requires `nvidia-smi` on `PATH`.
 - The monitor keeps logging server `/metrics` and host usage either way; the missing probe is reported once as `[monitor] device sampling is disabled; cause: ...`.
 

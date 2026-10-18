@@ -36,7 +36,7 @@ def test_gpu_product_name_keeps_the_words_that_tell_variants_apart(raw: str, exp
     assert gpu_product_name(raw) == expected
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("Arch.Rngd", "RNGD"), ("Rngd", "RNGD"), ("Arch.RngdMax", "RNGD-MAX")])
+@pytest.mark.parametrize(("raw", "expected"), [("RNGD", "RNGD"), ("Arch.Rngd", "RNGD"), ("Rngd", "RNGD"), ("Arch.RngdMax", "RNGD-MAX")])
 def test_npu_arch_name(raw: str, expected: str) -> None:
     """RNGD variants are named after their arch, whether or not the enum prefix is present."""
     assert npu_arch_name(raw) == expected

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -14,8 +15,12 @@ import requests
 from furiosa_perf.log import logger
 from furiosa_perf.spec import Server
 
-# furiosa-llm counts tensor parallelism in PEs; one RNGD card has 8.
-PES_PER_RNGD = 8
+# furiosa-llm logs one line per replica with its pipeline stages, e.g.
+# "DP entry DpId(1) → PP devices [TpGroupId(npu2), TpGroupId(npu3)]".
+FURIOSA_REPLICA_LINE = re.compile(r"DP entry DpId\(\d+\) \S+ PP devices \[(.*?)\]")
+FURIOSA_STAGE = re.compile(r"TpGroupId\(([^)]*)\)")
+# Start of one launch in the appended server log (written by APIServerManager.start).
+LAUNCH_MARKER = "=== "
 STARTUP_TIMEOUT_S = 1800
 STARTUP_POLL_S = 5
 HEALTH_TIMEOUT_S = 5
@@ -54,8 +59,10 @@ def server_command(server: Server) -> tuple[list[str], dict[str, str]]:
     """Build the ``<backend> serve`` command line and its environment.
 
     The devices become ``--devices npu:<i>,...`` for furiosa-llm and
-    ``CUDA_VISIBLE_DEVICES`` for vLLM. All three parallel sizes are always passed:
-    furiosa-llm would otherwise infer data parallelism from the PEs it can see.
+    ``CUDA_VISIBLE_DEVICES`` for vLLM. vLLM gets all three parallel sizes. furiosa-llm
+    (2026.4+) gets the pipeline and data parallel sizes only: its tensor parallelism
+    is fixed when the artifact is built, so ``parallel.tp`` must match the artifact
+    and :func:`check_furiosa_layout` verifies the result after startup.
 
     Args:
         server: Server description.
@@ -71,7 +78,6 @@ def server_command(server: Server) -> tuple[list[str], dict[str, str]]:
     parallel = server.parallel
     if server.backend == "furiosa-llm":
         argv += ["--devices", ",".join(f"npu:{i}" for i in server.devices)]
-        argv += ["--tensor-parallel-size", str(parallel.tp * PES_PER_RNGD)]
     else:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, server.devices))
         argv += ["--tensor-parallel-size", str(parallel.tp)]
@@ -80,6 +86,56 @@ def server_command(server: Server) -> tuple[list[str], dict[str, str]]:
     for key, value in server.args.items():
         argv += option_args(key, value)
     return argv, env
+
+
+def furiosa_layout(log_text: str) -> list[list[set[int]]]:
+    """Replicas furiosa-llm placed, from its startup log: per replica, the cards of each stage.
+
+    A stage is a tensor-parallel group named after its cards, e.g. ``npu2`` or ``npu2-3``.
+
+    Args:
+        log_text: Server log of one launch.
+
+    Returns:
+        One list of stages per replica, each stage the set of its card indices;
+        empty if the log has no placement lines.
+    """
+    replicas = []
+    for stages in FURIOSA_REPLICA_LINE.findall(log_text):
+        placed = []
+        for group in FURIOSA_STAGE.findall(stages):
+            bounds = [int(n) for n in re.findall(r"\d+", group)]
+            placed.append(set(range(bounds[0], bounds[-1] + 1)) if bounds else set())
+        replicas.append(placed)
+    return replicas
+
+
+def check_furiosa_layout(server: Server, log_text: str) -> None:
+    """Fail if furiosa-llm placed the model differently from ``server.parallel``.
+
+    furiosa-llm takes its tensor parallelism from the artifact and does not reject a
+    mismatch: two cards with ``-pp 1 -dp 1`` and a one-card artifact silently use
+    only the first card. The placement it logs is compared with the config instead.
+
+    Raises:
+        RuntimeError: If the replicas, stages or cards differ from the config.
+    """
+    replicas = furiosa_layout(log_text)
+    if not replicas:
+        logger.warning("cannot verify the parallel layout: furiosa-llm logged no placement")
+        return
+    parallel = server.parallel
+    used = sorted(set().union(*(stage for replica in replicas for stage in replica)))
+    stage_cards = {len(stage) for replica in replicas for stage in replica}
+    expected = (parallel.dp, parallel.pp, {parallel.tp}, sorted(server.devices))
+    actual = (len(replicas), len(replicas[0]), stage_cards, used)
+    if actual != expected or any(len(replica) != parallel.pp for replica in replicas):
+        tp_cards = ",".join(map(str, sorted(stage_cards)))
+        raise RuntimeError(
+            f"furiosa-llm placed {len(replicas)} replica(s) of {len(replicas[0])} stage(s) with {tp_cards} card(s) "
+            f"each on npu {used}, not tp {parallel.tp} x pp {parallel.pp} x dp {parallel.dp} on npu "
+            f"{sorted(server.devices)}; the artifact fixes the tensor parallelism, so set 'parallel' to match it"
+        )
 
 
 def pid_listening_on(port: int) -> int:
@@ -160,13 +216,19 @@ class APIServerManager:
         logger.info(f"Server log: {self._log_path}")
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_file = open(self._log_path, "a", buffering=1)  # noqa: SIM115, PTH123 - closed in stop()
-        self._log_file.write(f"=== {time.strftime('%Y-%m-%dT%H:%M:%S%z')} {command}\n")
+        self._log_file.write(f"{LAUNCH_MARKER}{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {command}\n")
 
         self.server_process = subprocess.Popen(
             argv, env=env, stdout=self._log_file, stderr=self._log_file, text=True, start_new_session=True
         )
         self.server_pid = self.server_process.pid
         self._wait_for_startup()
+        if self.server.backend == "furiosa-llm":
+            try:
+                check_furiosa_layout(self.server, self._launch_log())
+            except RuntimeError:
+                self.stop()
+                raise
         logger.info("Server is ready.")
         return command
 
@@ -232,6 +294,20 @@ class APIServerManager:
             return str(response.json()["data"][0]["id"])
         except (requests.RequestException, KeyError, IndexError, ValueError):
             return None
+
+    def model_card(self) -> dict[str, Any]:
+        """The served model's ``/v1/models`` entry (furiosa-llm adds ``artifact_id``), empty if unavailable."""
+        try:
+            response = requests.get(f"{self.base_url}/v1/models", timeout=HEALTH_TIMEOUT_S)
+            response.raise_for_status()
+            return dict(response.json()["data"][0])
+        except (requests.RequestException, KeyError, IndexError, ValueError):
+            return {}
+
+    def _launch_log(self) -> str:
+        """Server log of the latest launch (the log file is appended across restarts)."""
+        text = self._log_path.read_text(errors="replace") if self._log_path.exists() else ""
+        return text[text.rfind(LAUNCH_MARKER) :] if LAUNCH_MARKER in text else text
 
     def _log_tail(self) -> str:
         """Last lines of the server log, for error messages."""

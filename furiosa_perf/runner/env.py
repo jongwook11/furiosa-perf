@@ -28,6 +28,7 @@ from typing import Any
 import psutil
 
 from furiosa_perf.log import logger
+from furiosa_perf.runner.devices import npu_memory_gib
 from furiosa_perf.spec import Server
 
 PROBE_TIMEOUT_S = 60
@@ -44,7 +45,7 @@ NATIVE_PACKAGE_MARKERS = ("furiosa", "nvidia", "cuda", "nccl")
 # Terminal colour codes some tools print even into a pipe (nvidia-smi topo -m).
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
-# furiosa_smi_py Arch variant -> device name used in result paths.
+# furiosa_smi Arch (str() is "RNGD" from 2026.4, "Arch.Rngd" before) -> device name in result paths.
 NPU_ARCH_NAMES = {"Rngd": "RNGD", "RngdS": "RNGD-S", "RngdPlus": "RNGD-PLUS", "RngdMax": "RNGD-MAX"}
 
 GPU_QUERY = (
@@ -211,47 +212,46 @@ def gpu_devices() -> tuple[list[dict[str, Any]], dict[str, str]]:
 def npu_devices() -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Every RNGD on the host and the raw ``furiosa-smi`` outputs.
 
-    RNGD exposes no power-limit setting; the governor profile is recorded instead.
+    RNGD has no default power limit to compare with, so the governor profile is what
+    marks a non-default power setting; the current limit is recorded as well.
 
     Returns:
-        ``(devices, raw)``; devices is empty when ``furiosa_smi_py`` is unavailable.
+        ``(devices, raw)``; devices is empty when ``furiosa_smi`` is unavailable.
     """
     raw = {
         "topology.txt": probe(["furiosa-smi", "topo"]),
         "smi.txt": probe(["furiosa-smi", "info", "--format", "json"]) + probe(["furiosa-smi", "version"]),
     }
     try:
-        import furiosa_smi_py  # optional dependency, present on RNGD hosts only
+        import furiosa_smi  # optional dependency, present on RNGD hosts only
 
-        furiosa_smi_py.init()
-        handles = list(furiosa_smi_py.list_devices())
-        driver = str(furiosa_smi_py.driver_info())
+        handles = list(furiosa_smi.list_devices())
+        driver = str(furiosa_smi.driver_info())
     except Exception as e:
-        logger.warning(f"cannot read RNGD devices through furiosa_smi_py; cause: {e}")
+        logger.warning(f"cannot read RNGD devices through furiosa_smi; cause: {e}")
         return [], raw
 
     devices = []
     for handle in handles:
-        info = handle.device_info()
         link = handle.pcie_info().link_info()
-        dram = handle.memory_utilization().dram().memory()
         devices.append(
             {
-                "index": int(info.index()),
-                "name": npu_arch_name(str(info.arch())),
-                "uuid": str(info.uuid()),
-                "serial": str(info.serial()),
-                "pci_bus_id": str(info.bdf()),
-                "numa_node": int(info.numa_node()),
-                "memory_gib": round(sum(block.total_bytes() for block in dram) / GIB, 2),
+                "index": int(handle.dev_node_index()),
+                "name": npu_arch_name(str(handle.arch())),
+                "uuid": str(handle.uuid()),
+                "serial": str(handle.serial()),
+                "pci_bus_id": str(handle.bdf()),
+                "numa_node": int(handle.numa_node()),
+                "memory_gib": npu_memory_gib(handle)[1],
                 "driver_version": driver,
-                "firmware_version": str(info.firmware_version()),
+                "firmware_version": str(handle.firmware_version()),
                 "governor": str(handle.governor_profile()).split(".")[-1],
+                "power_limit_w": handle.power_limit() / 1000,  # reported in mW
                 "idle_power_w": float(handle.power_consumption()),
                 "pcie_gen": int(link.pcie_gen_status()),
                 "pcie_width": int(link.link_width_status()),
                 "links": {
-                    str(other.device_info().index()): str(handle.device_to_device_link_type(other)).split(".")[-1]
+                    str(other.dev_node_index()): str(handle.device_to_device_link_type(other)).split(".")[-1]
                     for other in handles
                     if other is not handle
                 },

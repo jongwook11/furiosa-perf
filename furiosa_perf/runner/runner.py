@@ -75,7 +75,7 @@ class BenchmarkRunner:
             "backend_version": backend_version,
         }
         self.run_dir = run_dir(
-            output_dir,
+            output_dir.resolve(),  # clients run inside point directories, so relative paths would nest
             preset.kind,
             self.identity["hardware"],
             len(server.devices),
@@ -120,6 +120,7 @@ class BenchmarkRunner:
             logger.info(f"Starting server for {self.server.model}")
             server_command = api_server.start(reuse_running=reuse_server)
             run_info["server"]["command"] = server_command
+            run_info["server"]["model_card"] = api_server.model_card()
             write_json(self.run_dir / RUN_FILE, run_info)
             desc = (
                 f"* OS: {self.environment.host.get('os')}\n"

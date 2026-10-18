@@ -32,7 +32,8 @@ class Parallel:
     ``tp * pp * dp`` equals the number of devices.
 
     Attributes:
-        tp: Devices one model replica's tensors are split across.
+        tp: Devices one model replica's tensors are split across. For furiosa-llm
+            (2026.4+) this is fixed by the artifact and only checked, not passed.
         pp: Pipeline stages of one replica.
         dp: Independent replicas.
     """
