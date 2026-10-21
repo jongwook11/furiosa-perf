@@ -75,7 +75,7 @@ def test_capacity_is_the_last_user_count_before_the_first_miss() -> None:
 
 def test_command_targets_the_server_and_passes_the_slo_as_goodput(tmp_path: Path) -> None:
     """furiosa-perf sets the target, artifact directory and tokenizer; the SLO also becomes --goodput."""
-    preset = load_preset("simulation/chat-synthetic")
+    preset = load_preset("chat-synthetic", "simulation")
     client = AiperfClient(preset, "org/m", "0.0.0.0", 8000, tmp_path, {}, tokenizer="org/m-tokenizer")
     client.env = Path("/env")
     command = client.command(preset.points[0], tmp_path)

@@ -86,7 +86,7 @@ def test_a_search_preset_needs_an_slo_and_one_base_point() -> None:
 
 def test_search_range_can_be_overridden_per_run() -> None:
     """--search-min/--search-max replace one or both ends; an empty range or a preset without search is refused."""
-    preset = load_preset("simulation/chat-synthetic")
+    preset = load_preset("chat-synthetic", "simulation")
 
     assert with_search_range(preset, 16, None).search == Search("concurrency", 16, 256, 4)
     assert with_search_range(preset, None, 96).search == Search("concurrency", 8, 96, 4)
@@ -94,7 +94,7 @@ def test_search_range_can_be_overridden_per_run() -> None:
     with pytest.raises(ValueError, match="range 300..256 is empty"):
         with_search_range(preset, 300, None)
     with pytest.raises(ValueError, match="need a preset with a 'search' block"):
-        with_search_range(load_preset("baseline/text-gen"), 1, 2)
+        with_search_range(load_preset("text-gen", "baseline"), 1, 2)
 
 
 class FakeAiperf(AiperfClient):
@@ -109,7 +109,7 @@ class FakeAiperf(AiperfClient):
 
 def test_the_loop_runs_the_search_and_reports_it_as_capacity(tmp_path: Path) -> None:
     """With a search preset the client measures the probed user counts and run.json gets the search."""
-    client = FakeAiperf(load_preset("simulation/chat-synthetic"), "m", "h", 1, tmp_path, {})
+    client = FakeAiperf(load_preset("chat-synthetic", "simulation"), "m", "h", 1, tmp_path, {})
     client.run()
 
     capacity = client.run_summary()["capacity"]
@@ -129,7 +129,7 @@ class CrashingAiperf(FakeAiperf):
 
 def test_a_client_failure_stops_the_search_instead_of_counting_as_a_miss(tmp_path: Path) -> None:
     """A crashed tool says nothing about capacity, so no "below_min" verdict is drawn from it."""
-    client = CrashingAiperf(load_preset("simulation/chat-synthetic"), "m", "h", 1, tmp_path, {})
+    client = CrashingAiperf(load_preset("chat-synthetic", "simulation"), "m", "h", 1, tmp_path, {})
 
     with pytest.raises(RuntimeError, match="benchmark client failed at point u8"):
         client.run()

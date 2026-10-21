@@ -63,7 +63,7 @@ def test_parse_preset_rejects_invalid_presets(overrides: dict[str, object], mess
 @pytest.mark.parametrize("path", sorted(PRESETS_DIR.rglob("*.yaml")), ids=lambda p: p.stem)
 def test_every_bundled_preset_loads(path: Path) -> None:
     """The bundled presets are valid and every point has the fields a summary row is keyed by."""
-    loaded = load_preset(str(path.relative_to(PRESETS_DIR).with_suffix("")))
+    loaded = load_preset(path.stem, path.parent.name)
 
     assert loaded.points
     if loaded.kind == "baseline":
@@ -97,3 +97,11 @@ def test_preset_server_options_cannot_set_parallelism() -> None:
     server = parse_server({"backend": "vllm", "model": "m", "devices": 0}, Path("/env"))
     with pytest.raises(ValueError, match="parallelism comes from the server config"):
         apply_server_overrides(server, {"tensor-parallel-size": 2})
+
+
+def test_preset_of_another_kind_is_refused() -> None:
+    """`run baseline` with a simulation preset file stops before anything runs."""
+    with pytest.raises(ValueError, match="run it with `furiosa-perf run simulation`"):
+        load_preset(str(PRESETS_DIR / "simulation" / "chat-synthetic.yaml"), "baseline")
+    with pytest.raises(ValueError, match="baseline preset 'chat-synthetic' does not exist"):
+        load_preset("chat-synthetic", "baseline")

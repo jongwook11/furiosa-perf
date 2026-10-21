@@ -58,7 +58,7 @@ class CountingClient(BenchmarkClient):
 
 def test_before_point_runs_only_for_measured_points(tmp_path: Path) -> None:
     """A point kept on --resume is not re-measured, so it costs no restart either."""
-    preset = load_preset("baseline/text-gen")
+    preset = load_preset("text-gen", "baseline")
     preset = type(preset)(**{**preset.__dict__, "points": preset.points[:3]})
     kept = preset.points[1]
     (tmp_path / "i128-o128-c4").mkdir()
@@ -77,6 +77,6 @@ def test_restart_policy_is_validated() -> None:
     base = {"kind": "baseline", "task": "t", "client": "vllm-bench"}
 
     assert parse_preset(base).restart_server == "never"
-    assert load_preset("simulation/chat-synthetic").restart_server == "per-point"
+    assert load_preset("chat-synthetic", "simulation").restart_server == "per-point"
     with pytest.raises(ValueError, match="restart-server value 'always' is unsupported"):
         parse_preset({**base, "restart-server": "always"})

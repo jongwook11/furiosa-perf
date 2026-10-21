@@ -19,7 +19,7 @@ See [Benchmark Methodology](examples/BENCHMARK.md) for a detailed explanation of
 
 - **End-to-end automation** — server launch, benchmark execution, and teardown in one command
 - **Hardware monitoring** — power, temperature, utilization (NPU/GPU), host CPU/memory, and server `/metrics`, logged to CSV
-- **Presets** — bundled `baseline/text-gen`, `baseline/vision`, `baseline/embedding`, `baseline/rerank`, or your own YAML
+- **Presets** — `run baseline` with bundled `text-gen`, `vision`, `embedding`, `rerank`; `run simulation` with `chat-synthetic`, `chat-mooncake`; or your own YAML
 - **Flexible scenarios** — define token lengths and concurrency lists in a single YAML; `max_concurrency` can be a list and is auto-expanded
 
 ---
@@ -88,10 +88,11 @@ huggingface-cli login
 ## Quick start
 
 ```bash
-furiosa-perf run \
-  --server-config examples/server/exaone4.yaml \
-  --preset baseline/text-gen
+furiosa-perf run baseline text-gen --server-config examples/server/exaone4.yaml
+furiosa-perf run simulation chat-synthetic --server-config examples/server/exaone4.yaml
 ```
+
+`run baseline` is the fixed-length sweep and `run simulation` the service simulation; each takes a preset of its kind (see [Presets](#presets)).
 
 See [`examples/script.sh`](examples/script.sh) for a complete working example.
 
@@ -99,10 +100,10 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 
 | Option | Required | Default | Description |
 |---|---|---|---|
+| `PRESET` (argument) | ✓ | — | A bundled preset of the command's kind, such as `text-gen` or `chat-synthetic`, or a YAML file of that kind |
 | `--server-config` | ✓ | — | API server config YAML (backend, model, devices, …) |
-| `--preset` | ✓ | — | Benchmark preset: a bundled name such as `baseline/text-gen`, or a YAML file |
 | `--output-dir` | | `results` | Root of the results tree |
-| `--search-min`, `--search-max` | | from the preset | Range of the preset's capacity search for this run |
+| `--search-min`, `--search-max` | | from the preset | `run simulation` only: range of the preset's capacity search for this run |
 | `--resume` | | off | Finish a run already in its results directory, keeping valid points |
 | `--overwrite` | | off | Delete a run already in its results directory and start over |
 | `--reuse-server` | | off | Benchmark a server already running on the configured port instead of launching one |
@@ -203,20 +204,20 @@ Furiosa AI supported models are available at [huggingface.co/furiosa-ai](https:/
 
 ---
 
-### Presets (`--preset`)
+### Presets
 
 A preset says what to measure: which client, which server options the measurement needs, and the points to run. Pass a bundled name or a YAML file of your own.
 
-| Bundled preset | Task |
-|---|---|
-| `baseline/text-gen` | Text generation, fixed ISL/OSL from 128/128 to 128k/1k |
-| `baseline/vision` | One 256x256 image plus text, the same total lengths as `text-gen` |
-| `baseline/embedding` | Embeddings, 256 to 32k input tokens |
-| `baseline/rerank` | Reranking, 5 documents per query, 256 to 8k tokens |
-| `simulation/chat-synthetic` | General chatbot: multi-turn synthetic conversations, capacity search over 8 to 256 users, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
-| `simulation/chat-mooncake` | Production chatbot trace (Kimi, Mooncake FAST'25 conversation trace) replayed at its recorded times, capacity search over 5 to 100 % of its recorded speed, same SLO |
+| Command | Bundled preset | Task |
+|---|---|---|
+| `run baseline` | `text-gen` | Text generation, fixed ISL/OSL from 128/128 to 128k/1k |
+| `run baseline` | `vision` | One 256x256 image plus text, the same total lengths as `text-gen` |
+| `run baseline` | `embedding` | Embeddings, 256 to 32k input tokens |
+| `run baseline` | `rerank` | Reranking, 5 documents per query, 256 to 8k tokens |
+| `run simulation` | `chat-synthetic` | General chatbot: multi-turn synthetic conversations, capacity search over 8 to 256 users, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
+| `run simulation` | `chat-mooncake` | Production chatbot trace (Kimi, Mooncake FAST'25 conversation trace) replayed at its recorded times, capacity search over 5 to 100 % of its recorded speed, same SLO |
 
-The bundled files are in [`furiosa_perf/presets/`](furiosa_perf/presets); copy one to change the points. The format:
+The bundled files are in [`furiosa_perf/presets/`](furiosa_perf/presets); copy one to change the points and pass the file instead of the name. A preset's `kind` must match the command. The format:
 
 ```yaml
 kind: baseline            # fixed-length baseline sweep

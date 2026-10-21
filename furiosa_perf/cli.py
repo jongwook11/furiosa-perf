@@ -10,7 +10,9 @@ warnings.filterwarnings("ignore", message=".*doesn't match a supported version.*
 import json  # noqa: E402
 import shlex  # noqa: E402
 import sys  # noqa: E402
+from collections.abc import Callable  # noqa: E402
 from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
 
 import click  # noqa: E402
 
@@ -30,25 +32,62 @@ from furiosa_perf.spec import (  # noqa: E402
 )
 
 
-@click.command()
-@click.option(
-    "--server-config",
-    required=True,
-    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
-    help="API server config (YAML): backend, model, devices, env, and options passed to `<backend> serve`.",
-)
-@click.option(
-    "--preset",
-    required=True,
-    help="Benchmark preset: a YAML file, or a bundled name such as baseline/text-gen.",
-)
-@click.option(
-    "--output-dir",
-    default="results",
-    show_default=True,
-    type=click.Path(file_okay=False, path_type=Path),
-    help="Root of the results tree; each run goes to <kind>/<device>/<task>/<model> under it.",
-)
+def _run_options(f: Callable[..., None]) -> Callable[..., None]:
+    """Options shared by every kind of run."""
+    for option in reversed(
+        [
+            click.argument("preset"),
+            click.option(
+                "--server-config",
+                required=True,
+                type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+                help="API server config (YAML): backend, model, devices, env, and options passed to `<backend> serve`.",
+            ),
+            click.option(
+                "--output-dir",
+                default="results",
+                show_default=True,
+                type=click.Path(file_okay=False, path_type=Path),
+                help="Root of the results tree; each run goes to <kind>/<device>/<task>/<model> under it.",
+            ),
+            click.option(
+                "--resume",
+                is_flag=True,
+                help="Finish a run already in the results directory, keeping its valid points.",
+            ),
+            click.option(
+                "--overwrite", is_flag=True, help="Delete a run already in the results directory and start over."
+            ),
+            click.option(
+                "--reuse-server",
+                is_flag=True,
+                help="Benchmark a server already running on the configured port instead of launching one.",
+            ),
+            click.option(
+                "--check",
+                is_flag=True,
+                help="Validate the server config and preset, print the server command and point count, then exit.",
+            ),
+        ]
+    ):
+        f = option(f)
+    return f
+
+
+@click.group()
+def run() -> None:
+    """Launch an API server, run a benchmark preset against it, and save results."""
+
+
+@run.command()
+@_run_options
+def baseline(**options: Any) -> None:
+    """Fixed-length sweep: PRESET is text-gen, vision, embedding, rerank, or a preset file."""
+    _run("baseline", **options)
+
+
+@run.command()
+@_run_options
 @click.option(
     "--search-min",
     type=click.IntRange(min=1),
@@ -59,35 +98,28 @@ from furiosa_perf.spec import (  # noqa: E402
     type=click.IntRange(min=1),
     help="Override the upper end of the preset's capacity search.",
 )
-@click.option("--resume", is_flag=True, help="Finish a run already in the results directory, keeping its valid points.")
-@click.option("--overwrite", is_flag=True, help="Delete a run already in the results directory and start over.")
-@click.option(
-    "--reuse-server",
-    is_flag=True,
-    help="Benchmark a server already running on the configured port instead of launching one.",
-)
-@click.option(
-    "--check",
-    is_flag=True,
-    help="Validate the server config and preset, print the server command and point count, then exit.",
-)
-def run(
-    server_config: Path,
+def simulation(search_min: int | None, search_max: int | None, **options: Any) -> None:
+    """Service simulation: PRESET is chat-synthetic, chat-mooncake, or a preset file."""
+    _run("simulation", search_min=search_min, search_max=search_max, **options)
+
+
+def _run(
+    kind: str,
     preset: str,
+    server_config: Path,
     output_dir: Path,
-    search_min: int | None,
-    search_max: int | None,
     resume: bool,
     overwrite: bool,
     reuse_server: bool,
     check: bool,
+    search_min: int | None = None,
+    search_max: int | None = None,
 ) -> None:
-    """Launch an API server, run benchmark scenarios, and save results."""
     setup_logger("WARNING" if check else "INFO")  # --check prints only the plan
     if resume and overwrite:
         raise click.UsageError("--resume and --overwrite are mutually exclusive")
     try:
-        benchmark = with_search_range(load_preset(preset), search_min, search_max)
+        benchmark = with_search_range(load_preset(preset, kind), search_min, search_max)
         server = apply_server_overrides(load_server(server_config, default_env=Path(sys.prefix)), benchmark.server)
     except ValueError as e:
         raise click.UsageError(str(e)) from None

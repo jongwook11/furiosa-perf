@@ -244,7 +244,9 @@ def apply_server_overrides(server: Server, overrides: dict[str, Any]) -> Server:
     """
     for key in overrides:
         if key in PARALLEL_SERVER_ARGS:
-            raise ValueError(f"the preset server option '{key}' is not allowed; parallelism comes from the server config")
+            raise ValueError(
+                f"the preset server option '{key}' is not allowed; parallelism comes from the server config"
+            )
     args = dict(server.args)
     for pair in EXCLUSIVE_SERVER_ARGS:
         if any(key in overrides for key in pair):
@@ -405,7 +407,9 @@ def parse_preset(raw: dict[str, Any]) -> Preset:
         raise ValueError(f"the preset keys {sorted(unknown)} are unknown; use {', '.join(known)}")
     restart = raw.get("restart-server", "never")
     if restart not in RESTART_POLICIES:
-        raise ValueError(f"the restart-server value '{restart}' is unsupported; use one of {', '.join(RESTART_POLICIES)}")
+        raise ValueError(
+            f"the restart-server value '{restart}' is unsupported; use one of {', '.join(RESTART_POLICIES)}"
+        )
     for key in ("kind", "task", "client"):
         if not raw.get(key):
             raise ValueError(f"the preset is missing '{key}'")
@@ -482,11 +486,12 @@ def with_search_range(preset: Preset, minimum: int | None, maximum: int | None) 
 PRESETS_DIR = Path(__file__).parent / "presets"
 
 
-def resolve_preset(name_or_path: str) -> Path:
-    """Find a preset file: a path, or a name of a bundled preset such as ``baseline/text-gen``.
+def resolve_preset(name_or_path: str, kind: str) -> Path:
+    """Find a preset file: a path, or the name of a bundled preset of ``kind`` such as ``text-gen``.
 
     Args:
-        name_or_path: File path, or a name relative to the bundled presets directory.
+        name_or_path: File path, or a name relative to the bundled presets directory of ``kind``.
+        kind: Measurement type the preset is for (``baseline`` or ``simulation``).
 
     Returns:
         Path of the preset file.
@@ -497,26 +502,29 @@ def resolve_preset(name_or_path: str) -> Path:
     path = Path(name_or_path).expanduser()
     if path.is_file():
         return path
-    bundled = PRESETS_DIR / f"{name_or_path}.yaml"
+    bundled = PRESETS_DIR / kind / f"{name_or_path}.yaml"
     if bundled.is_file():
         return bundled
-    available = sorted(str(p.relative_to(PRESETS_DIR).with_suffix("")) for p in PRESETS_DIR.rglob("*.yaml"))
-    raise ValueError(f"the preset '{name_or_path}' does not exist; give a file path or one of {', '.join(available)}")
+    available = sorted(p.stem for p in (PRESETS_DIR / kind).glob("*.yaml"))
+    raise ValueError(
+        f"the {kind} preset '{name_or_path}' does not exist; give a file path or one of {', '.join(available)}"
+    )
 
 
-def load_preset(name_or_path: str) -> Preset:
-    """Load and validate a preset by path or bundled name.
+def load_preset(name_or_path: str, kind: str) -> Preset:
+    """Load and validate a preset of ``kind`` by path or bundled name.
 
     Args:
         name_or_path: See :func:`resolve_preset`.
+        kind: Measurement type the preset must declare.
 
     Returns:
         The validated preset.
 
     Raises:
-        ValueError: If the preset cannot be found or is invalid.
+        ValueError: If the preset cannot be found, is invalid, or is of another kind.
     """
-    path = resolve_preset(name_or_path)
+    path = resolve_preset(name_or_path, kind)
     with path.open() as f:
         raw = yaml.safe_load(f)
     if not isinstance(raw, dict):
@@ -525,5 +533,7 @@ def load_preset(name_or_path: str) -> Preset:
         preset = parse_preset(raw)
     except ValueError as e:
         raise ValueError(f"{path}: {e}") from None
+    if preset.kind != kind:
+        raise ValueError(f"{path} is a {preset.kind} preset; run it with `furiosa-perf run {preset.kind}`")
     logger.info(f"Loaded preset {path}: {preset.kind}/{preset.task}, {len(preset.points)} points")
     return preset
