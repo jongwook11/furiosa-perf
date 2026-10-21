@@ -316,43 +316,41 @@ The monitor columns merged into each scenario's summary row:
 
 ## Reports
 
-Turn one or more benchmark runs into a self-contained interactive HTML report:
+Build a static report site from one or more results directories:
 
 ```bash
-furiosa-perf report \
-  --benchmark-result-path ./results \
-  --model-list all \
-  --task-list all \
-  --report-path ./report
+furiosa-perf report results/ [more results directories…] -o site
+python -m http.server -d site 8080      # or any static web server, e.g. an S3 bucket
 ```
 
-The command walks `--benchmark-result-path` for `<task>/<model>/summary.csv`
-files (the aggregate summaries written by `run`), and renders per-(ISL/OSL)
-charts — throughput table, interactive per-user curve, rack-level performance,
-TTFT/TPOT, and TPS/Watt — into `--report-path` (default `./report`). Open
-`report/index.html` in a browser. The raw CSVs are also bundled under
-`report/csv/` and indexed in `report/manifest.json`.
+`report` reads every run under the given directories — the results tree (`run.json` and each point's `record.json`) and results written before it (`bench_space`, `<device>_<n>_<backend>_<version>/<tool>/<task>/<model>/summary.csv`) — and writes:
 
-The landing page opens with a **RNGD vs RTX Pro 6000** comparison: one bar chart
-per metric (TPS/User, TPS/Watt, Median TTFT, Median TPOT) for the 1024/1024
-scenario, broken down by concurrency. Bars are oriented so taller always means
-RNGD is better — TPS/User and TPS/Watt as RNGD / RTX Pro 6000, Median TTFT and
-Median TPOT as RTX Pro 6000 / RNGD — with a dashed 90% reference line. Each
-model is a separate bar you can toggle from the legend; models unsupported on
-RNGD simply show no bar. At each concurrency RNGD uses its best-performing device
-count and RTX Pro 6000 is matched to the device count closest to it (shown in the
-bar's hover tooltip). The comparison targets (scenario, hardware families,
-reference line, metrics) are configured in `furiosa_perf/reporting/theme.py`.
+```
+site/index.html  style.css  *.js     the viewer
+site/theme/                          the look of the site (--theme)
+site/data/index.json                 every run: what it measured, on what, how many points
+site/data/runs/<run id>.json         the points of one run, fetched when a page needs them
+```
+
+The viewer only fetches the runs a page shows, so the site stays fast as results accumulate. To add results, rerun with `--data-only`: only `data/` is rewritten. A run measured again keeps both results; the pages use the newest.
+
+| Page | Shows |
+|---|---|
+| Summary | RNGD against one GPU platform: one metric per model at one ISL/OSL (throughput per kW at an SLO, users at SLO, peak TPS, TPS/W, single-user TPOT/TTFT) |
+| Explorer | Any two metrics of one model's runs against each other, one curve per hardware, device count and version |
+| Releases | One RNGD metric per model across furiosa-llm releases, with the change from the previous release |
+| Data | Every run with its point counts and server flags; each run's points as JSON, the filtered list as CSV |
+
+The page and its controls are in the URL, so a view can be shared as a link. Summary, Explorer and Releases compare fixed-length `text-gen` and `vision` runs; the Data page lists every run.
 
 ### CLI options
 
-| Option | Required | Default | Description |
-|---|---|---|---|
-| `--benchmark-result-path` | ✓ | — | Root directory to scan for `summary.csv` results |
-| `--model-list` | | `all` | Comma-separated model names, or `all` |
-| `--task-list` | | `all` | Comma-separated task names, or `all` |
-| `--report-contents` | | — | Optional YAML overriding the report title/abstract/theme |
-| `--report-path` | | `./report` | Output directory for the generated report |
+| Option | Default | Description |
+|---|---|---|
+| `RESULTS` (arguments) | — | Results directories to read |
+| `-o`, `--output` | `site` | Site directory |
+| `--data-only` | off | Rewrite only `data/`, keeping the viewer and theme already in the site |
+| `--theme` | — | Directory with a `theme.css` (and the fonts or images it refers to), copied to `site/theme/`; it can override the colour tokens, `--font`/`--mono` and `.brand-logo` in `style.css` |
 
 ---
 
