@@ -55,7 +55,7 @@ function latestRuns(runs) {
 async function generationRuns() {
   return latestRuns((await loadIndex()).filter((r) => r.kind === 'baseline' && GEN_TASKS[r.task]));
 }
-const GEN_TASKS = { 'text-gen': 'Text', 'vision': 'Vision' };
+const GEN_TASKS = { 'text': 'Text', 'image-text': 'Image + text' };
 
 function shapeOptions(runs) {
   const set = {};

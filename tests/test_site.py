@@ -24,13 +24,13 @@ def _results(tmp_path: Path) -> Path:
     flag_experiment.mkdir()
     (flag_experiment / "summary.csv").write_text(LEGACY_SUMMARY)
 
-    run = tmp_path / "results" / "baseline" / "H100_2-tp1-dp2_vllm" / "text-gen" / "org--m"
+    run = tmp_path / "results" / "baseline" / "H100_2-tp1-dp2_vllm" / "text" / "org--m"
     (run / "i1024-o128-c1").mkdir(parents=True)
     (run / "run.json").write_text(
         json.dumps(
             {
                 "kind": "baseline",
-                "task": "text-gen",
+                "task": "text",
                 "model": "org/m",
                 "hardware": "H100",
                 "hardware_product": "H100-80GB-HBM3",
@@ -60,7 +60,7 @@ def test_both_result_layouts_become_runs(tmp_path: Path) -> None:
     new, legacy = collect_runs([_results(tmp_path)])  # sorted by id
 
     assert (legacy["task"], legacy["model"], legacy["hw"], legacy["n"], legacy["ver"]) == (
-        "text-gen",
+        "text",
         "m",
         "RNGD",
         4,
@@ -76,7 +76,7 @@ def test_both_result_layouts_become_runs(tmp_path: Path) -> None:
         "tp1-dp2",
         [],
     )
-    assert new["id"] == "H100-80GB-HBM3_2-tp1-dp2_vllm_0.30.0--baseline--text-gen--m--202610180228"
+    assert new["id"] == "H100-80GB-HBM3_2-tp1-dp2_vllm_0.30.0--baseline--text--m--202610180228"
 
 
 def test_site_has_an_index_and_one_file_per_run(tmp_path: Path) -> None:

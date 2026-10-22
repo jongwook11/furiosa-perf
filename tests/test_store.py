@@ -40,10 +40,10 @@ def test_points_that_would_share_a_directory_are_rejected() -> None:
 
 def test_run_dir_layout() -> None:
     """kind / device_count[-layout]_backend_version / task / org--model."""
-    path = run_dir(Path("out"), "baseline", "H100-80GB-HBM3", 2, "tp1-dp2", "vllm_0.28.0", "text-gen", "Qwen/Qwen3-8B")
+    path = run_dir(Path("out"), "baseline", "H100-80GB-HBM3", 2, "tp1-dp2", "vllm_0.28.0", "text", "Qwen/Qwen3-8B")
 
-    assert path == Path("out/baseline/H100-80GB-HBM3_2-tp1-dp2_vllm_0.28.0/text-gen/Qwen--Qwen3-8B")
-    assert run_dir(Path("out"), "baseline", "RNGD", 4, "", "furiosa-llm_2026.4.0", "text-gen", "m").parts[2] == (
+    assert path == Path("out/baseline/H100-80GB-HBM3_2-tp1-dp2_vllm_0.28.0/text/Qwen--Qwen3-8B")
+    assert run_dir(Path("out"), "baseline", "RNGD", 4, "", "furiosa-llm_2026.4.0", "text", "m").parts[2] == (
         "RNGD_4_furiosa-llm_2026.4.0"
     )
 
@@ -74,7 +74,7 @@ def test_resume_keeps_and_overwrite_deletes_an_existing_run(tmp_path: Path) -> N
 
 def test_a_fresh_directory_is_created(tmp_path: Path) -> None:
     """The first run of a configuration just creates its directory."""
-    path = tmp_path / "baseline" / "x" / "text-gen" / "m"
+    path = tmp_path / "baseline" / "x" / "text" / "m"
     prepare_run_dir(path, resume=False, overwrite=False)
 
     assert path.is_dir()

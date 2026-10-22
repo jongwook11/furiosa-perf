@@ -184,7 +184,7 @@ PAGES.explorer = async function (st) {
     + (clipAt !== null ? ' Curves are shown up to ' + fmt(clipAt) + ' TPS per user, within the range measured on all shown systems.' : '');
 
   return '<div class="explorer"><aside class="panel">'
-    + select('Model', 'model', model, models) + select('Task', 'task', task, tasks.map((t) => ({ v: t, label: GEN_TASKS[t] + ' · ' + t })))
+    + select('Model', 'model', model, models) + select('Task', 'task', task, tasks.map((t) => ({ v: t, label: GEN_TASKS[t] })))
     + select('ISL / OSL', 'scen', scen, scens)
     + '<div class="ctl">Hardware · backend' + seriesList + '</div>'
     + select('Normalize', 'norm', norm, [{ v: 'dev', label: 'Per device' }, { v: 'sys', label: 'Per system' }])

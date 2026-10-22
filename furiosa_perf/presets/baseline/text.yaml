@@ -1,7 +1,7 @@
 # Fixed-length baseline for text generation: random prompts of a fixed input length,
 # exactly OSL output tokens each (ignore-eos), closed-loop concurrency sweep.
 kind: baseline
-task: text-gen
+task: text
 client: vllm-bench
 
 # Applied over the server config.

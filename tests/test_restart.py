@@ -58,7 +58,7 @@ class CountingClient(BenchmarkClient):
 
 def test_before_point_runs_only_for_measured_points(tmp_path: Path) -> None:
     """A point kept on --resume is not re-measured, so it costs no restart either."""
-    preset = load_preset("text-gen", "baseline")
+    preset = load_preset("text", "baseline")
     preset = type(preset)(**{**preset.__dict__, "points": preset.points[:3]})
     kept = preset.points[1]
     (tmp_path / "i128-o128-c4").mkdir()

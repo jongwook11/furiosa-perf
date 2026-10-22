@@ -25,7 +25,7 @@ from furiosa_perf.results.store import RECORD_FILE, RUN_FILE, read_json
 VIEWER = resources.files("furiosa_perf.reporting") / "viewer"
 
 # Task names of results written before the presets (bench_space) -> preset task names.
-LEGACY_TASKS = {"offline": "text-gen", "vl-offline": "vision", "embeddings": "embedding", "reranker": "rerank"}
+LEGACY_TASKS = {"offline": "text", "vl-offline": "image-text", "embeddings": "embedding", "reranker": "rerank"}
 # bench_space run directory: <device>_<n>_<backend>_<version>
 LEGACY_RUN_DIR = re.compile(r"^(?P<hw>.+?)_(?P<n>\d+)_(?P<backend>[^_]+)_(?P<ver>.+)$")
 # Server flags worth showing next to a run (feature switches, not plumbing like ports or devices).
@@ -102,8 +102,9 @@ def load_run(run_file: Path) -> dict[str, Any] | None:
         return None
     records = [read_json(p) for p in sorted(run_file.parent.glob(f"*/{RECORD_FILE}"))]
     return _run(
-        kind={"simulation": "scenario"}.get(meta["kind"], meta["kind"]),  # results from before the rename
-        task=meta["task"],
+        # results from before the renames
+        kind={"simulation": "scenario"}.get(meta["kind"], meta["kind"]),
+        task={"text-gen": "text", "vision": "image-text"}.get(meta["task"], meta["task"]),
         model_id=meta["model"],
         hw=meta.get("hardware_product") or meta["hardware"],
         n=meta["num_devices"],

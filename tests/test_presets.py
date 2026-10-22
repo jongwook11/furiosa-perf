@@ -16,7 +16,7 @@ from furiosa_perf.spec import (
 
 def preset(**overrides: object) -> dict[str, object]:
     """A minimal valid preset mapping with ``overrides`` applied."""
-    return {"kind": "baseline", "task": "text-gen", "client": "vllm-bench", **overrides}
+    return {"kind": "baseline", "task": "text", "client": "vllm-bench", **overrides}
 
 
 def test_expand_matrix_takes_the_cartesian_product_of_list_values() -> None:

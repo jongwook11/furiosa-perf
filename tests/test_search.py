@@ -94,7 +94,7 @@ def test_search_range_can_be_overridden_per_run() -> None:
     with pytest.raises(ValueError, match="range 300..256 is empty"):
         with_search_range(preset, 300, None)
     with pytest.raises(ValueError, match="need a preset with a 'search' block"):
-        with_search_range(load_preset("text-gen", "baseline"), 1, 2)
+        with_search_range(load_preset("text", "baseline"), 1, 2)
 
 
 class FakeAiperf(AiperfClient):

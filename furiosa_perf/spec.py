@@ -332,7 +332,7 @@ class Preset:
 
     Attributes:
         kind: Measurement type; ``baseline`` is the fixed-length sweep.
-        task: Label of what is measured (``text-gen``, ``vision``, ...), used in result paths.
+        task: Label of what is measured (``text``, ``image-text``, ...), used in result paths.
         client: Benchmark client; ``vllm-bench`` runs ``vllm bench serve``.
         server: Server options the measurement requires, applied over the server config.
         points: One mapping of client options per measurement point, already expanded.
@@ -487,7 +487,7 @@ PRESETS_DIR = Path(__file__).parent / "presets"
 
 
 def resolve_preset(name_or_path: str, kind: str) -> Path:
-    """Find a preset file: a path, or the name of a bundled preset of ``kind`` such as ``text-gen``.
+    """Find a preset file: a path, or the name of a bundled preset of ``kind`` such as ``text``.
 
     Args:
         name_or_path: File path, or a name relative to the bundled presets directory of ``kind``.

@@ -24,7 +24,7 @@ The vLLM benchmark tool is installed on first use into its own Python venv, pinn
 
 ### Workload construction
 
-Each point of a preset becomes one `vllm bench serve` call: the preset's shared `args`, overlaid with the point's matrix values, plus the target and result file that `furiosa-perf` sets itself. For a `baseline/text-gen` point:
+Each point of a preset becomes one `vllm bench serve` call: the preset's shared `args`, overlaid with the point's matrix values, plus the target and result file that `furiosa-perf` sets itself. For a `baseline/text` point:
 
 ```bash
 python -m vllm.entrypoints.cli.main bench serve \
@@ -38,7 +38,7 @@ python -m vllm.entrypoints.cli.main bench serve \
   --max-concurrency <C> --num-prompts <3 x C>
 ```
 
-The other bundled presets differ only in their `args` (see `furiosa_perf/presets/baseline/`): `vision` sends one random 256x256 image per request through `/v1/chat/completions`, `embedding` and `rerank` use the pooling endpoints and have no output length.
+The other bundled presets differ only in their `args` (see `furiosa_perf/presets/baseline/`): `image-text` sends one random 256x256 image per request through `/v1/chat/completions`, `embedding` and `rerank` use the pooling endpoints and have no output length.
 
 ### Why `num-prompts = max-concurrency × 3`
 
@@ -82,7 +82,7 @@ From TTFT, TPOT, and Output Throughput you can derive the per-user experience at
 
 ## Shape examples
 
-The `baseline/text-gen` preset covers a wide range of input lengths at varying concurrency to characterise both short-context and long-context performance (excerpt):
+The `baseline/text` preset covers a wide range of input lengths at varying concurrency to characterise both short-context and long-context performance (excerpt):
 
 ```yaml
 matrix:

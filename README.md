@@ -19,7 +19,7 @@ See [Benchmark Methodology](examples/BENCHMARK.md) for a detailed explanation of
 
 - **End-to-end automation** — server launch, benchmark execution, and teardown in one command
 - **Hardware monitoring** — power, temperature, utilization (NPU/GPU), host CPU/memory, and server `/metrics`, logged to CSV
-- **Presets** — `run baseline` with bundled `text-gen`, `vision`, `embedding`, `rerank`; `run scenario` with `chat-synthetic`, `chat-mooncake`; or your own YAML
+- **Presets** — `run baseline` with bundled `text`, `image-text`, `embedding`, `rerank`; `run scenario` with `chat-synthetic`, `chat-mooncake`; or your own YAML
 - **Flexible sweeps** — define token lengths and concurrency lists in a single YAML; `max_concurrency` can be a list and is auto-expanded
 
 ---
@@ -88,7 +88,7 @@ huggingface-cli login
 ## Quick start
 
 ```bash
-furiosa-perf run baseline text-gen --server-config examples/server/exaone4.yaml
+furiosa-perf run baseline text --server-config examples/server/exaone4.yaml
 furiosa-perf run scenario chat-synthetic --server-config examples/server/exaone4.yaml
 ```
 
@@ -100,7 +100,7 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 
 | Option | Required | Default | Description |
 |---|---|---|---|
-| `PRESET` (argument) | ✓ | — | A bundled preset of the command's kind, such as `text-gen` or `chat-synthetic`, or a YAML file of that kind |
+| `PRESET` (argument) | ✓ | — | A bundled preset of the command's kind, such as `text` or `chat-synthetic`, or a YAML file of that kind |
 | `--server-config` | ✓ | — | API server config YAML (backend, model, devices, …) |
 | `--output-dir` | | `results` | Root of the results tree |
 | `--search-min`, `--search-max` | | from the preset | `run scenario` only: range of the preset's capacity search for this run |
@@ -210,8 +210,8 @@ A preset says what to measure: which client, which server options the measuremen
 
 | Command | Bundled preset | Task |
 |---|---|---|
-| `run baseline` | `text-gen` | Text generation, fixed ISL/OSL from 128/128 to 128k/1k |
-| `run baseline` | `vision` | One 256x256 image plus text, the same total lengths as `text-gen` |
+| `run baseline` | `text` | Text generation, fixed ISL/OSL from 128/128 to 128k/1k |
+| `run baseline` | `image-text` | One 256x256 image plus text, the same total lengths as `text` |
 | `run baseline` | `embedding` | Embeddings, 256 to 32k input tokens |
 | `run baseline` | `rerank` | Reranking, 5 documents per query, 256 to 8k tokens |
 | `run scenario` | `chat-synthetic` | General chatbot: multi-turn synthetic conversations, capacity search over 8 to 256 users, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
@@ -221,7 +221,7 @@ The bundled files are in [`furiosa_perf/presets/`](furiosa_perf/presets); copy o
 
 ```yaml
 kind: baseline            # fixed-length baseline sweep
-task: text-gen            # label used in result paths
+task: text            # label used in result paths
 client: vllm-bench        # runs `vllm bench serve` (pinned version, own venv)
 server:                   # applied over the server config; null removes an option
   no-enable-prefix-caching: true
@@ -276,7 +276,7 @@ Results are written under `--output-dir` (default `./results`), one directory pe
 results/
 └── <kind>/                                        # baseline
     └── <DEVICE>_<NUM>[-<LAYOUT>]_<BACKEND>_<VERSION>/   # e.g. RNGD_4_furiosa-llm_2026.4.0, H100-80GB-HBM3_2-tp1-dp2_vllm_0.30.0
-        └── <task>/<org>--<model>/                 # e.g. text-gen/furiosa-ai--Qwen3-8B-FP8
+        └── <task>/<org>--<model>/                 # e.g. text/furiosa-ai--Qwen3-8B-FP8
             ├── run.json                  # what was run, on what, with which versions; status and point counts
             ├── env/                      # raw environment probes: host.txt, smi.txt, topology.txt, devices.json,
             │                             #   packages.txt, server-freeze.txt, client-freeze.txt, env-vars.json
@@ -341,7 +341,7 @@ The viewer only fetches the runs a page shows, so the site stays fast as results
 | Releases | One RNGD metric per model across furiosa-llm releases, with the change from the previous release |
 | Data | Every run with its point counts and server flags; each run's points as JSON, the filtered list as CSV |
 
-The page and its controls are in the URL, so a view can be shared as a link. Summary, Explorer and Releases compare fixed-length `text-gen` and `vision` runs; the Data page lists every run.
+The page and its controls are in the URL, so a view can be shared as a link. Summary, Explorer and Releases compare fixed-length `text` and `image-text` runs; the Data page lists every run.
 
 ### CLI options
 

@@ -27,7 +27,7 @@ PAGES.releases = async function (st) {
   const slo = st.slo > 0 ? st.slo : 20;
   const controls = '<div class="controls">'
     + select('Devices', 'dev', dev, [{ v: 'all', label: 'All device counts' }].concat(devs.map((n) => ({ v: String(n), label: 'RNGD ×' + n }))))
-    + select('Task', 'task', task, tasks.map((t) => ({ v: t, label: GEN_TASKS[t] + ' · ' + t })))
+    + select('Task', 'task', task, tasks.map((t) => ({ v: t, label: GEN_TASKS[t] })))
     + select('ISL / OSL', 'scen', scen, scens)
     + select('Metric', 'metric', metric, Object.keys(METRICS).map((k) => ({ v: k, label: METRICS[k].label })))
     + (M.slo ? sloInput(slo) : '') + '</div>';

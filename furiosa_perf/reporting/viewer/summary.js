@@ -25,7 +25,7 @@ PAGES.summary = async function (st) {
 
   const opt = (k) => ({ v: k, label: platformLabel(k) });
   const controls = '<div class="controls">'
-    + select('Task', 'task', task, tasks.map((t) => ({ v: t, label: GEN_TASKS[t] + ' · ' + t })))
+    + select('Task', 'task', task, tasks.map((t) => ({ v: t, label: GEN_TASKS[t] })))
     + select('ISL / OSL', 'scen', scen, scens)
     + select('RNGD', 'rngd', rngd, rngdKeys.map(opt))
     + select('Compare with', 'gpu', gpu, gpuKeys.map(opt))

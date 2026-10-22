@@ -82,7 +82,7 @@ def run() -> None:
 @run.command()
 @_run_options
 def baseline(**options: Any) -> None:
-    """Fixed-length sweep: PRESET is text-gen, vision, embedding, rerank, or a preset file."""
+    """Fixed-length sweep: PRESET is text, image-text, embedding, rerank, or a preset file."""
     _run("baseline", **options)
 
 
