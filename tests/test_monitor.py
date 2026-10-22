@@ -1,4 +1,4 @@
-"""Tests for the per-scenario summary cut out of ``monitor.csv``."""
+"""Tests for the per-point summary cut out of ``monitor.csv``."""
 
 import pandas as pd
 import pytest
@@ -14,7 +14,7 @@ def iso(second: float) -> str:
 
 
 def scenario_frame(num_active: int = 12, with_server_metrics: bool = True) -> pd.DataFrame:
-    """A 1 Hz monitor log shaped like a real RNGD scenario.
+    """A 1 Hz monitor log shaped like a real RNGD point.
 
     * 0-2 s: client start-up, nothing running, 40 W idle;
     * 3 s on: ``num_active`` rows with 4 requests running; power ramps 100 -> 200 W and
@@ -54,7 +54,7 @@ def scenario_frame(num_active: int = 12, with_server_metrics: bool = True) -> pd
 
 
 def summarize(df: pd.DataFrame, end_second: float, max_concurrency: int = 4) -> dict:
-    """Summarize a scenario that started at T0 and whose client exited at ``end_second``."""
+    """Summarize a point that started at T0 and whose client exited at ``end_second``."""
     return summarize_window(df, iso(0), iso(end_second), max_concurrency)
 
 

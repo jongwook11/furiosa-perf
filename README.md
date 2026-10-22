@@ -2,7 +2,7 @@
 
 `furiosa-perf` is a performance benchmarking CLI for **LLM serving**.
 
-It automates the full benchmark pipeline: launch an API server → run [vLLM benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) scenarios → collect hardware metrics → save CSV/Markdown summaries.
+It automates the full benchmark pipeline: launch an API server → run [vLLM benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) points → collect hardware metrics → save CSV/Markdown summaries.
 
 **Supported backends:**
 
@@ -19,8 +19,8 @@ See [Benchmark Methodology](examples/BENCHMARK.md) for a detailed explanation of
 
 - **End-to-end automation** — server launch, benchmark execution, and teardown in one command
 - **Hardware monitoring** — power, temperature, utilization (NPU/GPU), host CPU/memory, and server `/metrics`, logged to CSV
-- **Presets** — `run baseline` with bundled `text-gen`, `vision`, `embedding`, `rerank`; `run simulation` with `chat-synthetic`, `chat-mooncake`; or your own YAML
-- **Flexible scenarios** — define token lengths and concurrency lists in a single YAML; `max_concurrency` can be a list and is auto-expanded
+- **Presets** — `run baseline` with bundled `text-gen`, `vision`, `embedding`, `rerank`; `run scenario` with `chat-synthetic`, `chat-mooncake`; or your own YAML
+- **Flexible sweeps** — define token lengths and concurrency lists in a single YAML; `max_concurrency` can be a list and is auto-expanded
 
 ---
 
@@ -89,10 +89,10 @@ huggingface-cli login
 
 ```bash
 furiosa-perf run baseline text-gen --server-config examples/server/exaone4.yaml
-furiosa-perf run simulation chat-synthetic --server-config examples/server/exaone4.yaml
+furiosa-perf run scenario chat-synthetic --server-config examples/server/exaone4.yaml
 ```
 
-`run baseline` is the fixed-length sweep and `run simulation` the service simulation; each takes a preset of its kind (see [Presets](#presets)).
+`run baseline` is the fixed-length sweep and `run scenario` replays service traffic such as multi-turn chat; each takes a preset of its kind (see [Presets](#presets)).
 
 See [`examples/script.sh`](examples/script.sh) for a complete working example.
 
@@ -103,7 +103,7 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 | `PRESET` (argument) | ✓ | — | A bundled preset of the command's kind, such as `text-gen` or `chat-synthetic`, or a YAML file of that kind |
 | `--server-config` | ✓ | — | API server config YAML (backend, model, devices, …) |
 | `--output-dir` | | `results` | Root of the results tree |
-| `--search-min`, `--search-max` | | from the preset | `run simulation` only: range of the preset's capacity search for this run |
+| `--search-min`, `--search-max` | | from the preset | `run scenario` only: range of the preset's capacity search for this run |
 | `--resume` | | off | Finish a run already in its results directory, keeping valid points |
 | `--overwrite` | | off | Delete a run already in its results directory and start over |
 | `--reuse-server` | | off | Benchmark a server already running on the configured port instead of launching one |
@@ -214,8 +214,8 @@ A preset says what to measure: which client, which server options the measuremen
 | `run baseline` | `vision` | One 256x256 image plus text, the same total lengths as `text-gen` |
 | `run baseline` | `embedding` | Embeddings, 256 to 32k input tokens |
 | `run baseline` | `rerank` | Reranking, 5 documents per query, 256 to 8k tokens |
-| `run simulation` | `chat-synthetic` | General chatbot: multi-turn synthetic conversations, capacity search over 8 to 256 users, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
-| `run simulation` | `chat-mooncake` | Production chatbot trace (Kimi, Mooncake FAST'25 conversation trace) replayed at its recorded times, capacity search over 5 to 100 % of its recorded speed, same SLO |
+| `run scenario` | `chat-synthetic` | General chatbot: multi-turn synthetic conversations, capacity search over 8 to 256 users, SLO TTFT p95 ≤ 3 s and TPOT p95 ≤ 50 ms |
+| `run scenario` | `chat-mooncake` | Production chatbot trace (Kimi, Mooncake FAST'25 conversation trace) replayed at its recorded times, capacity search over 5 to 100 % of its recorded speed, same SLO |
 
 The bundled files are in [`furiosa_perf/presets/`](furiosa_perf/presets); copy one to change the points and pass the file instead of the name. A preset's `kind` must match the command. The format:
 
@@ -238,7 +238,7 @@ matrix:                   # one point per combination; list values are expanded
 - furiosa-perf sets the client's target (`model`, `host`, `port`) and result file itself; presets cannot.
 - The baseline presets turn prefix caching off (random prompts must not hit a cache) and remove any reasoning parser, so thinking tokens stay in `content`, which is what the client counts.
 
-**Service simulation (`kind: simulation`, `client: aiperf`).** Points run [AIPerf](https://github.com/ai-dynamo/aiperf) (pinned, own venv). In `simulation/chat-synthetic` every user holds one conversation: a system prompt shared by all users (1,000 tokens), a context of their own (500), then 5 ± 2 turns of 150 ± 50 tokens in and 300 ± 100 out, with 10 ± 5 s of think time between a reply and the next message. Each turn re-sends the conversation so far, including the replies the server generated, so the server keeps prefix caching on. A point's `concurrency` is the number of users talking at once (a user keeps their slot during think time). The preset also sets `max-model-len: 8192` and turns thinking off for models that support it (`default-chat-template-kwargs: {enable_thinking: false}`).
+**Service scenario (`kind: scenario`, `client: aiperf`).** Points run [AIPerf](https://github.com/ai-dynamo/aiperf) (pinned, own venv). In `scenario/chat-synthetic` every user holds one conversation: a system prompt shared by all users (1,000 tokens), a context of their own (500), then 5 ± 2 turns of 150 ± 50 tokens in and 300 ± 100 out, with 10 ± 5 s of think time between a reply and the next message. Each turn re-sends the conversation so far, including the replies the server generated, so the server keeps prefix caching on. A point's `concurrency` is the number of users talking at once (a user keeps their slot during think time). The preset also sets `max-model-len: 8192` and turns thinking off for models that support it (`default-chat-template-kwargs: {enable_thinking: false}`).
 
 ```yaml
 slo:                      # p95 limits; a point meets the SLO when both hold
@@ -246,7 +246,7 @@ slo:                      # p95 limits; a point meets the SLO when both hold
   tpot_p95_ms: 50
 ```
 
-Instead of a fixed list of user counts, a simulation preset can bisect for capacity:
+Instead of a fixed list of user counts, a scenario preset can bisect for capacity:
 
 ```yaml
 search:
@@ -256,15 +256,15 @@ search:
   step: 4                 # stop when the passing and failing counts are 4 apart
 ```
 
-`restart-server: per-point` (set in `simulation/chat-synthetic`) launches a fresh server before every measured point, so no point inherits the previous one's prefix cache, queue or load; the preset's AIPerf warm-up (`warmup-request-count`) then primes the new server outside the measurement. The default, `never`, keeps one server for the whole run, as the baseline presets do.
+`restart-server: per-point` (set in `scenario/chat-synthetic`) launches a fresh server before every measured point, so no point inherits the previous one's prefix cache, queue or load; the preset's AIPerf warm-up (`warmup-request-count`) then primes the new server outside the measurement. The default, `never`, keeps one server for the whole run, as the baseline presets do.
 
 Both ends are measured first; if `min` already misses the SLO or `max` still meets it, the run says so (`bound: below_min` / `at_least_max`) instead of searching. Otherwise each probe halves the range, so 8..256 with step 4 takes at most 8 points. Override the range per run with `--search-min` / `--search-max`; `--check` prints the plan. Passing assumes more users never improves latency, so a noisy point at the edge can move the result by about one step.
 
 **Trace replay.** A preset with a `trace:` block replays a request trace in Mooncake format (`timestamp`, `input_length`, `output_length`, `hash_ids`) instead of synthetic traffic. The trace is downloaded once to `~/.cache/furiosa-perf/datasets/` and checked against the preset's `sha256`. It holds no text: AIPerf turns every hash id into a fixed 512-token block, so requests that shared a prompt prefix in production share it again and hit the prefix cache the same way. Requests are sent at their recorded times (open loop), stretched to `trace-speed-pct` percent of the recorded speed; each point replays the part of the trace that lasts `trace-duration` seconds at that speed, and requests longer than the server's `max-model-len` are left out and counted (`Dropped Too Long`). A point can start mid-trace (`trace-start`, recorded seconds) and first replay the `trace-warmup` seconds recorded before it, with one output token each and outside the measurement, so it is measured on a warm prefix cache rather than the trace's empty one; both runs read the same file, since AIPerf derives each hash id's tokens from the file's content. The search key is then `trace-speed-pct`, and `run.json` reports `capacity.max_speed_pct` with the trace's source, hash and license.
 
-Each simulation summary row has `slo_met`, and `run.json` gets `capacity: {slo, max_users, search}`: the most users whose point was valid and met the SLO, and with a search its range, step, bound and every probe with its verdict. The SLO is also passed to AIPerf as `--goodput`, reported per point as `Goodput(req/s)`.
+Each scenario summary row has `slo_met`, and `run.json` gets `capacity: {slo, max_users, search}`: the most users whose point was valid and met the SLO, and with a search its range, step, bound and every probe with its verdict. The SLO is also passed to AIPerf as `--goodput`, reported per point as `Goodput(req/s)`.
 
-**Point validity.** Each summary row has `ok` and `fail_reason`. A baseline point is invalid when the client exits with an error, more than 5 % of its requests fail, a generation point counts no output tokens, or, with `ignore-eos`, fewer than 90 % of the requested output tokens come back. A simulation point is invalid when AIPerf exits with an error, no request completes, more than 5 % fail, or a streaming run measures no time to first token. Invalid points keep their measured values. The run goes on after an invalid point unless the server stopped answering, in which case it stops and reports how many points were not run.
+**Point validity.** Each summary row has `ok` and `fail_reason`. A baseline point is invalid when the client exits with an error, more than 5 % of its requests fail, a generation point counts no output tokens, or, with `ignore-eos`, fewer than 90 % of the requested output tokens come back. A scenario point is invalid when AIPerf exits with an error, no request completes, more than 5 % fail, or a streaming run measures no time to first token. Invalid points keep their measured values. The run goes on after an invalid point unless the server stopped answering, in which case it stops and reports how many points were not run.
 
 ---
 
@@ -296,7 +296,7 @@ results/
 - Read `run.json` / `record.json` rather than parsing paths; they hold every field the path encodes and more.
 - A run directory that already holds a run is not touched: pass `--resume` to finish it (points recorded as valid are kept, the rest run again) or `--overwrite` to start over.
 
-The monitor columns merged into each scenario's summary row:
+The monitor columns merged into each point's summary row:
 
 | Column | Meaning |
 |---|---|
@@ -304,11 +304,11 @@ The monitor columns merged into each scenario's summary row:
 | `mean_power`, `energy_j` | Energy integrated over the active window, and that energy divided by `active_s` |
 | `gen_tok_per_j`, `total_tok_per_j` | Generated (or prompt + generated) tokens per joule, from the server's token counters over the same window |
 | `power_steady_w`, `power_p95_w` | Mean power while at least 90 % of `max_concurrency` requests run, and the 95th percentile over the active window |
-| `window_ok` | `False` when there are fewer than 10 active samples or no server metrics. RNGD power readings take a few seconds to follow the load, so treat power, energy and busy figures of such a scenario as indicative only |
+| `window_ok` | `False` when there are fewer than 10 active samples or no server metrics. RNGD power readings take a few seconds to follow the load, so treat power, energy and busy figures of such a point as indicative only |
 | `throttled` | `True` if any device reported a slowdown (power, thermal or clock cap) while active |
 | `npu_busy_pct` | RNGD only, when `window_ok`: executed PE cycles over the active window's cycle capacity |
 | `server_<ttft\|itl\|e2el>_mean_ms` | Server-side mean latencies from the `/metrics` histograms; the gap to the client's means is client, network and tokenization overhead |
-| `finished_<stop\|length\|abort>` | Requests the server finished per reason during the scenario |
+| `finished_<stop\|length\|abort>` | Requests the server finished per reason during the point |
 | `client_cpu_peak_pct` | Peak CPU of the benchmark client while requests run (100 = one core); near 100 the client, not the server, may limit throughput |
 
 

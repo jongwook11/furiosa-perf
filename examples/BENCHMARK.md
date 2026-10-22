@@ -6,13 +6,13 @@ This document explains how `furiosa-perf` measures LLM serving performance, why 
 
 ## Background
 
-`furiosa-perf` uses the [vLLM benchmark tool](https://github.com/vllm-project/vllm/tree/main/benchmarks) (`vllm bench serve`) to track serving performance across a fixed matrix of scenarios defined by:
+`furiosa-perf` uses the [vLLM benchmark tool](https://github.com/vllm-project/vllm/tree/main/benchmarks) (`vllm bench serve`) to track serving performance across a fixed matrix of shapes and concurrencies defined by:
 
 - **Input token length** (`random-input-len`) — the length of each prompt
 - **Output token length** (`random-output-len`) — the number of tokens to generate
 - **Max concurrency** (`max-concurrency`) — the number of requests processed simultaneously, treated as the effective batch size (i.e. concurrent users)
 
-Benchmarking against this fixed scenario matrix allows performance to be tracked consistently across hardware, firmware, and software versions.
+Benchmarking against this fixed matrix allows performance to be tracked consistently across hardware, firmware, and software versions.
 
 ### Isolated venv for the benchmark client
 
@@ -47,7 +47,7 @@ Setting `--num-prompts` to three times `--max-concurrency` (with `--request-rate
 1. **Warm-up phase** — the first `max_concurrency` requests are sent to the server all at once, filling the concurrency slot immediately.
 2. **Steady-state phase** — as each request completes, the next one from the remaining `2 × max_concurrency` pool is sent immediately, maintaining constant pressure.
 
-This tests **prefill and decode hybrid batching** under sustained load at the target concurrency level, which is representative of a real-world scenario where `max_concurrency` users are simultaneously active. Running only a single batch (`num_prompts = max_concurrency`) would measure cold-start behavior; the extra two batches ensure the server is benchmarked in its steady operating state.
+This tests **prefill and decode hybrid batching** under sustained load at the target concurrency level, which is representative of a real-world case where `max_concurrency` users are simultaneously active. Running only a single batch (`num_prompts = max_concurrency`) would measure cold-start behavior; the extra two batches ensure the server is benchmarked in its steady operating state.
 
 ### `max_concurrency` as the concurrency dimension
 
@@ -57,7 +57,7 @@ This tests **prefill and decode hybrid batching** under sustained load at the ta
 
 ## Metrics
 
-`furiosa-perf` collects the following metrics for each scenario:
+`furiosa-perf` collects the following metrics for each point:
 
 | Metric | Unit | Description |
 |---|---|---|
@@ -68,7 +68,7 @@ This tests **prefill and decode hybrid batching** under sustained load at the ta
 | **Output Throughput** | tok/s | Output tokens generated per second across all concurrent requests. |
 | **Total Throughput** | tok/s | Combined input + output tokens processed per second. |
 
-In addition, the configured devices (power, temperatures, utilization, clocks, throttling), the server's `/metrics` (queue, KV-cache usage, token and prefix-cache counters) and server/client/host CPU and memory are sampled once per second for the whole run; each scenario's window is cut out of that log, and the full `/metrics` text is captured at every scenario start and end. Power and energy are taken over the window in which requests were running, so tokens per joule and tokens per second share one time base. See the README for the summary columns.
+In addition, the configured devices (power, temperatures, utilization, clocks, throttling), the server's `/metrics` (queue, KV-cache usage, token and prefix-cache counters) and server/client/host CPU and memory are sampled once per second for the whole run; each point's window is cut out of that log, and the full `/metrics` text is captured at every point start and end. Power and energy are taken over the window in which requests were running, so tokens per joule and tokens per second share one time base. See the README for the summary columns.
 
 ### Reading the results
 
@@ -80,7 +80,7 @@ From TTFT, TPOT, and Output Throughput you can derive the per-user experience at
 
 ---
 
-## Scenario examples
+## Shape examples
 
 The `baseline/text-gen` preset covers a wide range of input lengths at varying concurrency to characterise both short-context and long-context performance (excerpt):
 
@@ -92,7 +92,7 @@ matrix:
   - {random-input-len: 130048, random-output-len: 1024, max-concurrency: [1, 4]}
 ```
 
-Short-context scenarios (128 tokens in/out) sweep a wider concurrency range to find the throughput ceiling. Long-context scenarios (e.g. 130 k input) cap concurrency lower because each request occupies significantly more KV-cache.
+Short-context shapes (128 tokens in/out) sweep a wider concurrency range to find the throughput ceiling. Long-context shapes (e.g. 130 k input) cap concurrency lower because each request occupies significantly more KV-cache.
 
 ---
 

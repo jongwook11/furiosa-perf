@@ -117,7 +117,7 @@ class NpuSampler:
         return samples
 
     def counters(self) -> dict[str, Any]:
-        """Cumulative counters and static state, captured at scenario boundaries.
+        """Cumulative counters and static state, captured at point boundaries.
 
         ``task_execution_cycle`` counts PE cycles spent executing; its difference over
         a window divided by ``clock * seconds`` is the exact busy fraction, which a
@@ -277,15 +277,15 @@ def make_sampler(device_name: str, indices: list[int]) -> NpuSampler | GpuSample
 
 
 def npu_busy_pct(start: dict[str, Any], end: dict[str, Any], active_s: float) -> float | None:
-    """Fraction of PE cycles spent executing during the active part of a scenario.
+    """Fraction of PE cycles spent executing during the active part of a point.
 
     The counters only advance while PEs execute, so dividing by the active duration
-    (not the whole scenario window, which includes client start-up) gives the busy
+    (not the whole point window, which includes client start-up) gives the busy
     fraction while requests were in flight.
 
     Args:
-        start: :meth:`NpuSampler.counters` at the scenario start.
-        end: :meth:`NpuSampler.counters` at the scenario end.
+        start: :meth:`NpuSampler.counters` at the point start.
+        end: :meth:`NpuSampler.counters` at the point end.
         active_s: Seconds during which the server had running requests.
 
     Returns:
@@ -316,7 +316,7 @@ class ProcessUsage:
 
     The client is not passed in: it is every process furiosa-perf (the monitor's
     parent) started, minus the server tree and the monitor itself. That stays correct
-    as the client is relaunched for every scenario.
+    as the client is relaunched for every point.
     """
 
     def __init__(self, server_pid: int) -> None:

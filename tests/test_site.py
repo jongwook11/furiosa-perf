@@ -87,7 +87,7 @@ def test_site_has_an_index_and_one_file_per_run(tmp_path: Path) -> None:
     write_data(runs, site)
 
     index = json.loads((site / "data" / "index.json").read_text())["runs"]
-    assert [(r["num_points"], r["failed"], r["scenarios"]) for r in index] == [
+    assert [(r["num_points"], r["failed"], r["shapes"]) for r in index] == [
         (1, 1, ["1024/128"]),
         (2, 1, ["128/128"]),
     ]

@@ -1,4 +1,4 @@
-# Service simulation replaying a production chatbot trace: Moonshot AI's Kimi
+# Service scenario replaying a production chatbot trace: Moonshot AI's Kimi
 # conversation workload from the Mooncake FAST'25 trace release (one hour of
 # requests, Apache-2.0). The trace holds only timestamps, token counts and prompt
 # block hashes, no text: AIPerf turns every hash id into a fixed 512-token block,
@@ -13,7 +13,7 @@
 # and ten requests arrive at once, so prefixes are reused about a tenth as often as
 # in steady state (4 % against 46 %). The 30 s recorded before the start are sent
 # first, outside the measurement, to fill the prefix cache as that history would.
-kind: simulation
+kind: scenario
 task: chat-mooncake
 client: aiperf
 

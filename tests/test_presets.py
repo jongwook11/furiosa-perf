@@ -100,8 +100,8 @@ def test_preset_server_options_cannot_set_parallelism() -> None:
 
 
 def test_preset_of_another_kind_is_refused() -> None:
-    """`run baseline` with a simulation preset file stops before anything runs."""
-    with pytest.raises(ValueError, match="run it with `furiosa-perf run simulation`"):
-        load_preset(str(PRESETS_DIR / "simulation" / "chat-synthetic.yaml"), "baseline")
+    """`run baseline` with a scenario preset file stops before anything runs."""
+    with pytest.raises(ValueError, match="run it with `furiosa-perf run scenario`"):
+        load_preset(str(PRESETS_DIR / "scenario" / "chat-synthetic.yaml"), "baseline")
     with pytest.raises(ValueError, match="baseline preset 'chat-synthetic' does not exist"):
         load_preset("chat-synthetic", "baseline")

@@ -77,6 +77,6 @@ def test_restart_policy_is_validated() -> None:
     base = {"kind": "baseline", "task": "t", "client": "vllm-bench"}
 
     assert parse_preset(base).restart_server == "never"
-    assert load_preset("chat-synthetic", "simulation").restart_server == "per-point"
+    assert load_preset("chat-synthetic", "scenario").restart_server == "per-point"
     with pytest.raises(ValueError, match="restart-server value 'always' is unsupported"):
         parse_preset({**base, "restart-server": "always"})

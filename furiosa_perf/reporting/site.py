@@ -102,7 +102,7 @@ def load_run(run_file: Path) -> dict[str, Any] | None:
         return None
     records = [read_json(p) for p in sorted(run_file.parent.glob(f"*/{RECORD_FILE}"))]
     return _run(
-        kind=meta["kind"],
+        kind={"simulation": "scenario"}.get(meta["kind"], meta["kind"]),  # results from before the rename
         task=meta["task"],
         model_id=meta["model"],
         hw=meta.get("hardware_product") or meta["hardware"],
@@ -179,7 +179,7 @@ def _columns(points: list[dict[str, Any]]) -> dict[str, list[Any]]:
     return {"cols": cols, "rows": [[point.get(c) for c in cols] for point in points]}
 
 
-def _scenarios(points: list[dict[str, Any]]) -> list[str]:
+def _shapes(points: list[dict[str, Any]]) -> list[str]:
     pairs = {(p["Input Tokens"], p["Output Tokens"]) for p in points if "Input Tokens" in p and "Output Tokens" in p}
     return [f"{i}/{o}" for i, o in sorted(pairs)]
 
@@ -202,9 +202,7 @@ def write_data(runs: list[dict[str, Any]], site: Path) -> None:
     for run in runs:
         points = run["points"]
         meta = {k: v for k, v in run.items() if k != "points"}
-        index.append(
-            meta | {"num_points": len(points), "failed": sum(map(_failed, points)), "scenarios": _scenarios(points)}
-        )
+        index.append(meta | {"num_points": len(points), "failed": sum(map(_failed, points)), "shapes": _shapes(points)})
         (data / "runs" / f"{run['id']}.json").write_text(json.dumps(_columns(points), separators=(",", ":")))
     generated = datetime.now(timezone.utc).isoformat(timespec="seconds")
     (data / "index.json").write_text(json.dumps({"generated": generated, "runs": index}, separators=(",", ":")))

@@ -1,4 +1,4 @@
-"""Run service-simulation points with AIPerf and summarize them against the preset's SLO.
+"""Run service-scenario points with AIPerf and summarize them against the preset's SLO.
 
 One point is one ``aiperf profile`` run. For chat presets a point's ``concurrency``
 is the number of users in a conversation at the same time: AIPerf keeps a session's
@@ -135,7 +135,7 @@ def max_users_within_slo(rows: list[dict[str, Any]]) -> float | None:
 
 
 class AiperfClient(BenchmarkClient):
-    """``aiperf profile``: service-simulation points such as multi-turn chat or a trace replay."""
+    """``aiperf profile``: service-scenario points such as multi-turn chat or a trace replay."""
 
     NAME = "aiperf"
     PACKAGE = "aiperf"

@@ -59,7 +59,7 @@ def test_fetch_trace_refuses_a_file_with_another_hash(tmp_path: Path) -> None:
 
 def test_trace_points_replay_a_written_slice_at_fixed_times(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The command replays the point's trace file on a fixed schedule bounded by the slice length."""
-    preset = load_preset("chat-mooncake", "simulation")
+    preset = load_preset("chat-mooncake", "scenario")
     client = AiperfClient(preset, "m", "h", 1, tmp_path, {}, tokenizer="t")
     client.env = Path("/env")
     client._trace_rows = ROWS
@@ -88,7 +88,7 @@ def test_capacity_of_a_trace_replay_is_a_speed() -> None:
 
 def test_a_warmed_point_replays_one_file_in_two_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Warm-up and measured requests share one file (same hash-id blocks); offsets split them."""
-    preset = load_preset("chat-mooncake", "simulation")
+    preset = load_preset("chat-mooncake", "scenario")
     client = AiperfClient(preset, "m", "h", 1, tmp_path, {}, tokenizer="t")
     client.env = Path("/env")
     client._trace_rows = ROWS

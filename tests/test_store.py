@@ -27,7 +27,7 @@ from furiosa_perf.results.store import (
     ],
 )
 def test_point_name_says_what_each_number_is(point: dict[str, object], expected: str) -> None:
-    """Baseline points are named by input, output or documents and concurrency; simulation points by their load."""
+    """Baseline points are named by input, output or documents and concurrency; scenario points by their load."""
     assert point_name(point) == expected
 
 

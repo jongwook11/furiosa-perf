@@ -4,9 +4,9 @@ Two consumers share the parser:
 
 * the monitor loop, which keeps a handful of gauges and counters per sample
   (:func:`sample_columns`), and
-* the per-scenario summary, which compares the full exposition taken at the
-  scenario start and end (:func:`summarize_snapshots`). Counters and histograms are
-  cumulative, so the difference of two snapshots is exactly the scenario's share
+* the per-point summary, which compares the full exposition taken at the
+  point start and end (:func:`summarize_snapshots`). Counters and histograms are
+  cumulative, so the difference of two snapshots is exactly the point's share
   without having to decide up front which metrics matter.
 
 Latency histograms are reduced to means (``_sum`` / ``_count``), not quantiles: their
@@ -80,7 +80,7 @@ SAMPLE_COLUMNS: dict[str, Column] = {
     "wire_hit_rate": Column(("wire_hit_rate",), reduce="max"),  # furiosa-llm only
 }
 
-# Latency histograms summarized per scenario; vLLM renamed time_per_output_token to inter_token_latency.
+# Latency histograms summarized per point; vLLM renamed time_per_output_token to inter_token_latency.
 LATENCY_HISTOGRAMS: dict[str, tuple[str, ...]] = {
     "ttft": ("time_to_first_token_seconds",),
     "itl": ("inter_token_latency_seconds", "time_per_output_token_seconds"),
@@ -152,7 +152,7 @@ def _counter_delta(start: list[Sample], end: list[Sample], name: str, **labels: 
 
 
 def summarize_snapshots(start_text: str, end_text: str, prefix: str) -> dict[str, float | None]:
-    """Server-side view of one scenario, from ``/metrics`` taken before and after it.
+    """Server-side view of one point, from ``/metrics`` taken before and after it.
 
     Args:
         start_text: Exposition captured just before the client started.

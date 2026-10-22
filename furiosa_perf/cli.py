@@ -98,9 +98,9 @@ def baseline(**options: Any) -> None:
     type=click.IntRange(min=1),
     help="Override the upper end of the preset's capacity search.",
 )
-def simulation(search_min: int | None, search_max: int | None, **options: Any) -> None:
-    """Service simulation: PRESET is chat-synthetic, chat-mooncake, or a preset file."""
-    _run("simulation", search_min=search_min, search_max=search_max, **options)
+def scenario(search_min: int | None, search_max: int | None, **options: Any) -> None:
+    """Service scenario: PRESET is chat-synthetic, chat-mooncake, or a preset file."""
+    _run("scenario", search_min=search_min, search_max=search_max, **options)
 
 
 def _run(

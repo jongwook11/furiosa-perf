@@ -6,13 +6,13 @@ PAGES.summary = async function (st) {
   const tasks = Object.keys(GEN_TASKS).filter((t) => all.some((r) => r.task === t));
   const task = tasks.indexOf(st.task) >= 0 ? st.task : tasks[0];
   const tRuns = all.filter((r) => r.task === task);
-  const scens = scenarioOptions(tRuns);
-  const scen = pickScenario(st.scen, scens);
+  const scens = shapeOptions(tRuns);
+  const scen = pickShape(st.scen, scens);
   const slo = st.slo > 0 ? st.slo : 20;
 
   // Platforms that measured this ISL/OSL pair.
   const plats = {};
-  tRuns.forEach((r) => { if ((r.scenarios || []).indexOf(scen) >= 0) plats[platformKey(r)] = r; });
+  tRuns.forEach((r) => { if ((r.shapes || []).indexOf(scen) >= 0) plats[platformKey(r)] = r; });
   const keys = Object.keys(plats);
   const rngdKeys = keys.filter((k) => family(plats[k].hw) === 'rngd').sort((a, b) => cmpVer(plats[b].ver, plats[a].ver));
   const gpuKeys = keys.filter((k) => family(plats[k].hw) !== 'rngd')

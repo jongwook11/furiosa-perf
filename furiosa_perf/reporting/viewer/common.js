@@ -57,12 +57,12 @@ async function generationRuns() {
 }
 const GEN_TASKS = { 'text-gen': 'Text', 'vision': 'Vision' };
 
-function scenarioOptions(runs) {
+function shapeOptions(runs) {
   const set = {};
-  runs.forEach((r) => (r.scenarios || []).forEach((s) => { set[s] = s.split('/').map(Number); }));
+  runs.forEach((r) => (r.shapes || []).forEach((s) => { set[s] = s.split('/').map(Number); }));
   return Object.keys(set).sort((a, b) => set[a][0] - set[b][0] || set[a][1] - set[b][1]);
 }
-function pickScenario(want, options) {
+function pickShape(want, options) {
   return options.indexOf(want) >= 0 ? want : options.indexOf('1024/1024') >= 0 ? '1024/1024' : options[0];
 }
 

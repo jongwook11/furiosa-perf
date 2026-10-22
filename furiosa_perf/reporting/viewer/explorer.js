@@ -50,8 +50,8 @@ PAGES.explorer = async function (st) {
   const tasks = Object.keys(GEN_TASKS).filter((t) => mRuns.some((r) => r.task === t));
   const task = tasks.indexOf(st.task) >= 0 ? st.task : tasks[0];
   const tRuns = mRuns.filter((r) => r.task === task);
-  const scens = scenarioOptions(tRuns);
-  const scen = pickScenario(st.scen, scens);
+  const scens = shapeOptions(tRuns);
+  const scen = pickShape(st.scen, scens);
   const norm = st.norm === 'sys' ? 'sys' : 'dev';
   const xKey = AXES[st.x] ? st.x : 'tps_user', yKey = AXES[st.y] ? st.y : 'tps_kw';
   const slo = st.slo > 0 ? st.slo : 20, showFailed = st.failed === '1';

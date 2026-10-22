@@ -8,8 +8,8 @@ A background process samples once per second, for the whole run:
   (:mod:`furiosa_perf.runner.server_metrics`);
 * CPU and memory of the server, the benchmark client and the host.
 
-Around every scenario the main process also appends the full ``/metrics`` text and
-the device counters to ``metrics_snapshots.jsonl``. Per-scenario numbers are then
+Around every point the main process also appends the full ``/metrics`` text and
+the device counters to ``metrics_snapshots.jsonl``. Per-point numbers are then
 cut out of the CSV by timestamp (:func:`summarize_window`) and from the snapshot pair
 (:func:`~furiosa_perf.runner.server_metrics.summarize_snapshots`).
 
@@ -51,9 +51,9 @@ SNAPSHOTS_JSONL = "metrics_snapshots.jsonl"
 
 SAMPLE_INTERVAL_S = 1.0
 METRICS_TIMEOUT_S = 2
-# Fewer active samples than this and the scenario is flagged window_ok = False: RNGD
+# Fewer active samples than this and the point is flagged window_ok = False: RNGD
 # power readings take ~3.5 s to follow a load change, and 1 Hz sampling cannot time a
-# short scenario precisely, so power, energy and busy figures of such a window are rough.
+# short point precisely, so power, energy and busy figures of such a window are rough.
 MIN_ACTIVE_SAMPLES = 10
 # Rows with at least this fraction of max_concurrency running count as steady state.
 STEADY_RATIO = 0.9
@@ -253,7 +253,7 @@ SUMMARY_KEYS = [
 
 
 def summarize_window(df: pd.DataFrame, start: str, end: str, max_concurrency: int) -> dict[str, Any]:
-    """Summarize the monitor rows of one scenario.
+    """Summarize the monitor rows of one point.
 
     Every rate and efficiency uses one *active* window so they agree with each other:
     it runs from the first to the last row with a running request between ``start``
@@ -268,10 +268,10 @@ def summarize_window(df: pd.DataFrame, start: str, end: str, max_concurrency: in
         df: ``monitor.csv`` covering ``[start, end]``.
         start: ISO timestamp taken just before the client started.
         end: ISO timestamp taken just after the client exited.
-        max_concurrency: Scenario concurrency, for the steady-state cut.
+        max_concurrency: Point concurrency, for the steady-state cut.
 
     Returns:
-        A dict with the same keys for every scenario; values that cannot be
+        A dict with the same keys for every point; values that cannot be
         computed are ``None``.
     """
     summary: dict[str, Any] = dict.fromkeys(SUMMARY_KEYS)
@@ -355,11 +355,11 @@ def summarize_window(df: pd.DataFrame, start: str, end: str, max_concurrency: in
 
 
 @dataclass
-class ScenarioWindow:
-    """State captured by :meth:`HardwareMonitor.begin` for one scenario.
+class PointWindow:
+    """State captured by :meth:`HardwareMonitor.begin` for one point.
 
     Attributes:
-        name: Scenario name, also used as the snapshot key.
+        name: Point name, also used as the snapshot key.
         start: ISO timestamp taken just before the client started.
         metrics: ``/metrics`` text at the start (empty if unreachable).
         counters: Device counters at the start (empty for GPUs or on failure).
@@ -372,7 +372,7 @@ class ScenarioWindow:
 
 
 class HardwareMonitor:
-    """Owns the monitor process and turns its output into per-scenario summaries."""
+    """Owns the monitor process and turns its output into per-point summaries."""
 
     def __init__(self, config: MonitorConfig) -> None:
         """Store the configuration; call :meth:`start` to begin sampling.
@@ -415,13 +415,13 @@ class HardwareMonitor:
         self.config = replace(self.config, server_pid=server_pid)
         self.start()
 
-    def begin(self, name: str) -> ScenarioWindow:
-        """Mark the start of a scenario; call right before launching the client.
+    def begin(self, name: str) -> PointWindow:
+        """Mark the start of a point; call right before launching the client.
 
-        Restarts the monitor process if it died, so the scenario still gets data.
+        Restarts the monitor process if it died, so the point still gets data.
 
         Args:
-            name: Scenario name.
+            name: Point name.
 
         Returns:
             The window to pass to :meth:`end`.
@@ -429,19 +429,19 @@ class HardwareMonitor:
         if self._process is not None and not self._process.is_alive():
             logger.error(f"monitor process exited with code {self._process.exitcode}; restarting it")
             self.start()
-        window = ScenarioWindow(name=name, start=_now())
+        window = PointWindow(name=name, start=_now())
         window.metrics, window.counters = self._snapshot(name, "start")
         return window
 
-    def end(self, window: ScenarioWindow, max_concurrency: int, slice_dir: Path | None = None) -> dict[str, Any]:
-        """Mark the end of a scenario and summarize it; call right after the client exits.
+    def end(self, window: PointWindow, max_concurrency: int, slice_dir: Path | None = None) -> dict[str, Any]:
+        """Mark the end of a point and summarize it; call right after the client exits.
 
-        Waits one sample interval so the last rows of the scenario are in the CSV.
+        Waits one sample interval so the last rows of the point are in the CSV.
 
         Args:
             window: Value returned by :meth:`begin`.
-            max_concurrency: Scenario concurrency, for the steady-state cut.
-            slice_dir: If given, the scenario's rows of ``monitor.csv`` and
+            max_concurrency: Point concurrency, for the steady-state cut.
+            slice_dir: If given, the point's rows of ``monitor.csv`` and
                 ``devices.csv`` are also written there.
 
         Returns:
@@ -463,7 +463,7 @@ class HardwareMonitor:
             logger.warning(f"monitor produced no rows between {window.start} and {end}")
         if summary["window_ok"] and (summary["client_cpu_peak_pct"] or 0.0) >= CLIENT_CPU_WARN_PCT:
             logger.warning(
-                f"the benchmark client used {summary['client_cpu_peak_pct']}% CPU in scenario {window.name}; "
+                f"the benchmark client used {summary['client_cpu_peak_pct']}% CPU in point {window.name}; "
                 "throughput may be limited by the client, not the server"
             )
         if slice_dir is not None:
@@ -489,14 +489,14 @@ class HardwareMonitor:
             except Exception as e:
                 logger.warning(f"failed to read NPU counters for the {phase} snapshot of {name}; cause: {e}")
 
-        record = {"scenario": name, "phase": phase, "timestamp": _now(), "devices": counters, "metrics": metrics}
+        record = {"point": name, "phase": phase, "timestamp": _now(), "devices": counters, "metrics": metrics}
         self.config.log_dir.mkdir(parents=True, exist_ok=True)
         with (self.config.log_dir / SNAPSHOTS_JSONL).open("a") as f:
             f.write(json.dumps(record) + "\n")
         return metrics, counters
 
     def _write_slice(self, start: str, end: str, slice_dir: Path, monitor_rows: pd.DataFrame) -> None:
-        """Copy the scenario's rows next to its results."""
+        """Copy the point's rows next to its results."""
         start_ts, end_ts = pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True)
         slice_dir.mkdir(parents=True, exist_ok=True)
         for name, rows in ((MONITOR_CSV, monitor_rows), (DEVICES_CSV, _read_csv(self.config.log_dir / DEVICES_CSV))):

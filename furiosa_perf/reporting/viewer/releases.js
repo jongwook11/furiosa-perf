@@ -20,8 +20,8 @@ PAGES.releases = async function (st) {
   const devs = [...new Set(all.map((r) => r.n))].sort((a, b) => a - b);
   const dev = st.dev && devs.indexOf(+st.dev) >= 0 ? st.dev : 'all';
   const sel = all.filter((r) => dev === 'all' || r.n === +dev);
-  const scens = scenarioOptions(sel);
-  const scen = pickScenario(st.scen, scens);
+  const scens = shapeOptions(sel);
+  const scen = pickShape(st.scen, scens);
   const metric = METRICS[st.metric] ? st.metric : 'tpkw';
   const M = METRICS[metric];
   const slo = st.slo > 0 ? st.slo : 20;

@@ -262,8 +262,8 @@ MANAGED_CLIENT_ARGS: dict[str, tuple[str, ...]] = {
     "aiperf": ("model", "model-names", "url", "artifact-dir", "output-artifact-dir", "ui-type", "ui"),
 }
 CLIENTS = tuple(MANAGED_CLIENT_ARGS)
-# baseline: fixed-length sweep; simulation: service traffic such as multi-turn chat.
-KINDS = ("baseline", "simulation")
+# baseline: fixed-length sweep; scenario: service traffic such as multi-turn chat.
+KINDS = ("baseline", "scenario")
 # Service-level objectives a preset may set; each limits one latency percentile.
 SLO_KEYS = ("ttft_p95_ms", "tpot_p95_ms")
 # Load options a capacity search may vary: users talking at once, or the replay
@@ -491,7 +491,7 @@ def resolve_preset(name_or_path: str, kind: str) -> Path:
 
     Args:
         name_or_path: File path, or a name relative to the bundled presets directory of ``kind``.
-        kind: Measurement type the preset is for (``baseline`` or ``simulation``).
+        kind: Measurement type the preset is for (``baseline`` or ``scenario``).
 
     Returns:
         Path of the preset file.

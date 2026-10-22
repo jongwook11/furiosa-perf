@@ -72,7 +72,7 @@ def test_parse_search_rejects_invalid_ranges(raw: dict[str, Any], message: str) 
 def test_a_search_preset_needs_an_slo_and_one_base_point() -> None:
     """Without an SLO nothing decides pass/fail; the base point must leave the searched key to the search."""
     preset = {
-        "kind": "simulation",
+        "kind": "scenario",
         "task": "chat",
         "client": "aiperf",
         "search": {"key": "concurrency", "min": 1, "max": 9},
@@ -86,7 +86,7 @@ def test_a_search_preset_needs_an_slo_and_one_base_point() -> None:
 
 def test_search_range_can_be_overridden_per_run() -> None:
     """--search-min/--search-max replace one or both ends; an empty range or a preset without search is refused."""
-    preset = load_preset("chat-synthetic", "simulation")
+    preset = load_preset("chat-synthetic", "scenario")
 
     assert with_search_range(preset, 16, None).search == Search("concurrency", 16, 256, 4)
     assert with_search_range(preset, None, 96).search == Search("concurrency", 8, 96, 4)
@@ -109,7 +109,7 @@ class FakeAiperf(AiperfClient):
 
 def test_the_loop_runs_the_search_and_reports_it_as_capacity(tmp_path: Path) -> None:
     """With a search preset the client measures the probed user counts and run.json gets the search."""
-    client = FakeAiperf(load_preset("chat-synthetic", "simulation"), "m", "h", 1, tmp_path, {})
+    client = FakeAiperf(load_preset("chat-synthetic", "scenario"), "m", "h", 1, tmp_path, {})
     client.run()
 
     capacity = client.run_summary()["capacity"]
@@ -129,7 +129,7 @@ class CrashingAiperf(FakeAiperf):
 
 def test_a_client_failure_stops_the_search_instead_of_counting_as_a_miss(tmp_path: Path) -> None:
     """A crashed tool says nothing about capacity, so no "below_min" verdict is drawn from it."""
-    client = CrashingAiperf(load_preset("chat-synthetic", "simulation"), "m", "h", 1, tmp_path, {})
+    client = CrashingAiperf(load_preset("chat-synthetic", "scenario"), "m", "h", 1, tmp_path, {})
 
     with pytest.raises(RuntimeError, match="benchmark client failed at point u8"):
         client.run()
