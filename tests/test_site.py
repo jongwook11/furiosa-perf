@@ -40,6 +40,7 @@ def _results(tmp_path: Path) -> Path:
                 "backend_version": "0.30.0",
                 "started": "2026-10-18T02:28:08+00:00",
                 "server": {"command": "vllm serve org/m --no-enable-prefix-caching"},
+                "variant": {"max-num-seqs": 64},
             }
         )
     )
@@ -76,7 +77,8 @@ def test_both_result_layouts_become_runs(tmp_path: Path) -> None:
         "tp1-dp2",
         [],
     )
-    assert new["id"] == "H100-80GB-HBM3_2-tp1-dp2_vllm_0.30.0--baseline--text--m--202610180228"
+    assert new["variant"] == "max-num-seqs=64" and legacy["variant"] == ""
+    assert new["id"] == "H100-80GB-HBM3_2-tp1-dp2_vllm_0.30.0--baseline--text--m--max-num-seqs-64--202610180228"
 
 
 def test_site_has_an_index_and_one_file_per_run(tmp_path: Path) -> None:

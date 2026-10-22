@@ -1,6 +1,7 @@
 """Read and validate the two inputs of a run: the server config and the benchmark preset."""
 
 import itertools
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -227,14 +228,15 @@ def load_server(path: Path, default_env: Path) -> Server:
 
 
 def apply_server_overrides(server: Server, overrides: dict[str, Any]) -> Server:
-    """Return ``server`` with a preset's ``server`` options applied on top.
+    """Return ``server`` with a preset's ``server`` options, or ``--server-arg``, applied on top.
 
-    The preset wins: it states what its measurement needs (for example prefix
-    caching off for the fixed-length baseline). ``null`` removes an option.
+    The preset wins over the server config: it states what its measurement needs (for
+    example prefix caching off for the fixed-length baseline); ``--server-arg`` wins over
+    both. ``null`` removes an option.
 
     Args:
         server: Server from the server config.
-        overrides: The preset's ``server`` mapping, kebab-case keys.
+        overrides: Options to apply, kebab-case keys.
 
     Returns:
         The server with merged pass-through options.
@@ -245,7 +247,7 @@ def apply_server_overrides(server: Server, overrides: dict[str, Any]) -> Server:
     for key in overrides:
         if key in PARALLEL_SERVER_ARGS:
             raise ValueError(
-                f"the preset server option '{key}' is not allowed; parallelism comes from the server config"
+                f"the server option '{key}' cannot be overridden; parallelism comes from the server config"
             )
     args = dict(server.args)
     for pair in EXCLUSIVE_SERVER_ARGS:
@@ -254,6 +256,31 @@ def apply_server_overrides(server: Server, overrides: dict[str, Any]) -> Server:
                 args.pop(key, None)
     args.update(overrides)
     return replace(server, args=args)
+
+
+def parse_server_args(items: tuple[str, ...]) -> dict[str, Any]:
+    """Server options given with ``--server-arg``: ``key`` for a flag, ``key=value`` otherwise.
+
+    Values are read as YAML, so ``key=8192`` is a number and ``key=null`` removes the option.
+
+    Raises:
+        ValueError: If an item has no option name.
+    """
+    args: dict[str, Any] = {}
+    for item in items:
+        key, sep, value = item.removeprefix("--").partition("=")
+        if not key:
+            raise ValueError(f"--server-arg '{item}' has no option name")
+        args[key] = yaml.safe_load(value) if sep else True
+    return args
+
+
+def variant_label(args: dict[str, Any]) -> str:
+    """Name of a run's ``--server-arg`` options, e.g. ``no-enable-prefix-caching``; ``""`` without any."""
+    return "+".join(
+        key if value is True else f"{key}={value if isinstance(value, str) else json.dumps(value)}"
+        for key, value in sorted(args.items())
+    )
 
 
 # Client -> options furiosa-perf sets itself (target server, result location, UI).

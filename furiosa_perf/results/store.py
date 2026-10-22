@@ -2,7 +2,7 @@
 
 Layout under the output directory::
 
-    <kind>/<device>_<num devices>[-<layout>]_<backend>_<version>/<task>/<org>--<model>/
+    <kind>/<device>_<num devices>[-<layout>]_<backend>_<version>/<task>/<org>--<model>[__<variant>]/
         run.json                  what was run, on what, with which versions
         env/                      raw environment probes: host, devices, topology, packages, freezes
         server.log  monitor.csv  devices.csv  metrics_snapshots.jsonl
@@ -16,6 +16,7 @@ consumers should not parse paths, so the layout can change without breaking them
 """
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -82,7 +83,15 @@ def check_unique_point_names(points: list[dict[str, Any]]) -> None:
 
 
 def run_dir(
-    output_dir: Path, kind: str, device: str, num_devices: int, layout: str, backend: str, task: str, model: str
+    output_dir: Path,
+    kind: str,
+    device: str,
+    num_devices: int,
+    layout: str,
+    backend: str,
+    task: str,
+    model: str,
+    variant: str = "",
 ) -> Path:
     """Directory of one run (one server configuration, one preset task, one model).
 
@@ -95,12 +104,15 @@ def run_dir(
         backend: ``<backend>_<version>``, e.g. ``furiosa-llm_2026.4.0``.
         task: Preset task.
         model: Model ID the server serves; ``/`` becomes ``--``.
+        variant: :func:`furiosa_perf.spec.variant_label` of the run's ``--server-arg`` options,
+            so the same measurement with a server option changed gets its own directory.
 
     Returns:
         The run directory (not created).
     """
     layout_suffix = f"-{layout}" if layout else ""
-    return output_dir / kind / f"{device}_{num_devices}{layout_suffix}_{backend}" / task / model.replace("/", "--")
+    name = model.replace("/", "--") + ("__" + re.sub(r"[^\w.=+-]+", "-", variant) if variant else "")
+    return output_dir / kind / f"{device}_{num_devices}{layout_suffix}_{backend}" / task / name
 
 
 def prepare_run_dir(path: Path, resume: bool, overwrite: bool) -> None:

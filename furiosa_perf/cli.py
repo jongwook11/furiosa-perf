@@ -28,6 +28,7 @@ from furiosa_perf.spec import (  # noqa: E402
     apply_server_overrides,
     load_preset,
     load_server,
+    parse_server_args,
     with_search_range,
 )
 
@@ -42,6 +43,15 @@ def _run_options(f: Callable[..., None]) -> Callable[..., None]:
                 required=True,
                 type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
                 help="API server config (YAML): backend, model, devices, env, and options passed to `<backend> serve`.",
+            ),
+            click.option(
+                "--server-arg",
+                "server_args",
+                multiple=True,
+                metavar="KEY[=VALUE]",
+                help="Server option to set on top of the server config and preset, e.g. no-enable-prefix-caching "
+                "or max-num-seqs=64 (repeatable; KEY=null removes one). The run is stored as a variant next to "
+                "the run without it, for comparing a feature off and on.",
             ),
             click.option(
                 "--output-dir",
@@ -107,6 +117,7 @@ def _run(
     kind: str,
     preset: str,
     server_config: Path,
+    server_args: tuple[str, ...],
     output_dir: Path,
     resume: bool,
     overwrite: bool,
@@ -120,7 +131,9 @@ def _run(
         raise click.UsageError("--resume and --overwrite are mutually exclusive")
     try:
         benchmark = with_search_range(load_preset(preset, kind), search_min, search_max)
+        variant = parse_server_args(server_args)
         server = apply_server_overrides(load_server(server_config, default_env=Path(sys.prefix)), benchmark.server)
+        server = apply_server_overrides(server, variant)
     except ValueError as e:
         raise click.UsageError(str(e)) from None
     if reuse_server and benchmark.restart_server == "per-point":
@@ -136,7 +149,7 @@ def _run(
     if problems:
         raise click.UsageError("; ".join(problems))
 
-    runner = BenchmarkRunner(env, server, benchmark, output_dir, resume=resume, overwrite=overwrite)
+    runner = BenchmarkRunner(env, server, benchmark, output_dir, resume=resume, overwrite=overwrite, variant=variant)
     logger.info("Benchmarking started.")
     runner.execute(reuse_server=reuse_server)
     logger.info("Benchmarking completed.")

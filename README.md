@@ -102,6 +102,7 @@ See [`examples/script.sh`](examples/script.sh) for a complete working example.
 |---|---|---|---|
 | `PRESET` (argument) | ✓ | — | A bundled preset of the command's kind, such as `text` or `chat-synthetic`, or a YAML file of that kind |
 | `--server-config` | ✓ | — | API server config YAML (backend, model, devices, …) |
+| `--server-arg KEY[=VALUE]` | | — | Server option set on top of the server config and preset (repeatable; `KEY=null` removes one). The run is stored as a variant next to the run without it (see [Variants](#variants)) |
 | `--output-dir` | | `results` | Root of the results tree |
 | `--search-min`, `--search-max` | | from the preset | `run scenario` only: range of the preset's capacity search for this run |
 | `--resume` | | off | Finish a run already in its results directory, keeping valid points |
@@ -266,6 +267,15 @@ Each scenario summary row has `slo_met`, and `run.json` gets `capacity: {slo, ma
 
 **Point validity.** Each summary row has `ok` and `fail_reason`. A baseline point is invalid when the client exits with an error, more than 5 % of its requests fail, a generation point counts no output tokens, or, with `ignore-eos`, fewer than 90 % of the requested output tokens come back. A scenario point is invalid when AIPerf exits with an error, no request completes, more than 5 % fail, or a streaming run measures no time to first token. Invalid points keep their measured values. The run goes on after an invalid point unless the server stopped answering, in which case it stops and reports how many points were not run.
 
+**Variants.** To see what a server feature is worth, run the same preset again with the feature changed:
+
+```bash
+furiosa-perf run scenario chat-synthetic --server-config examples/server/exaone4.yaml
+furiosa-perf run scenario chat-synthetic --server-config examples/server/exaone4.yaml --server-arg no-enable-prefix-caching
+```
+
+`--server-arg` wins over the server config and the preset; one flag of a mutually exclusive pair (`enable-prefix-caching` / `no-enable-prefix-caching`) replaces the other. The second run goes to `<org>--<model>__no-enable-prefix-caching/` and records its options as `variant` in `run.json`, so neither run overwrites the other, and the report's Variants page puts them side by side.
+
 ---
 
 ## Outputs
@@ -276,7 +286,7 @@ Results are written under `--output-dir` (default `./results`), one directory pe
 results/
 └── <kind>/                                        # baseline
     └── <DEVICE>_<NUM>[-<LAYOUT>]_<BACKEND>_<VERSION>/   # e.g. RNGD_4_furiosa-llm_2026.4.0, H100-80GB-HBM3_2-tp1-dp2_vllm_0.30.0
-        └── <task>/<org>--<model>/                 # e.g. text/furiosa-ai--Qwen3-8B-FP8
+        └── <task>/<org>--<model>[__<variant>]/    # e.g. text/furiosa-ai--Qwen3-8B-FP8
             ├── run.json                  # what was run, on what, with which versions; status and point counts
             ├── env/                      # raw environment probes: host.txt, smi.txt, topology.txt, devices.json,
             │                             #   packages.txt, server-freeze.txt, client-freeze.txt, env-vars.json
@@ -339,7 +349,8 @@ The viewer only fetches the runs a page shows, so the site stays fast as results
 | Summary | RNGD against one GPU platform: one metric per model at one ISL/OSL (throughput per kW at an SLO, users at SLO, peak TPS, TPS/W, single-user TPOT/TTFT) |
 | Explorer | Any two metrics of one model's runs against each other, one curve per hardware, device count and version |
 | Releases | One RNGD metric per model across furiosa-llm releases, with the change from the previous release |
-| Data | Every run with its point counts and server flags; each run's points as JSON, the filtered list as CSV |
+| Variants | Scenario runs repeated with `--server-arg`, next to the run as configured: capacity within the SLO and point values at a load every run measured |
+| Data | Every run with its point counts, server flags and variant; each run's points as JSON, the filtered list as CSV |
 
 The page and its controls are in the URL, so a view can be shared as a link. Summary, Explorer and Releases compare fixed-length `text` and `image-text` runs; the Data page lists every run.
 

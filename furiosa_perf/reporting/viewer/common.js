@@ -41,19 +41,19 @@ function pointsAt(run, isl, osl) {
   return (DATA.points[run.id] || []).filter((p) => p.isl === isl && p.osl === osl).sort((a, b) => a.conc - b.conc);
 }
 
-// The newest run of each identical measurement (same platform, layout, task and model).
+// The newest run of each identical measurement (same platform, layout, task, model and server options).
 function latestRuns(runs) {
   const best = {};
   runs.forEach((r) => {
-    const k = [r.hw, r.n, r.layout, r.backend, r.ver, r.kind, r.task, r.model].join('|');
+    const k = [r.hw, r.n, r.layout, r.backend, r.ver, r.kind, r.task, r.model, r.variant].join('|');
     if (!best[k] || (r.date || '') > (best[k].date || '')) best[k] = r;
   });
   return Object.values(best);
 }
 
-// Fixed-length generation runs: the ones the Summary, Explorer and Releases pages compare.
+// Fixed-length generation runs as configured (no --server-arg): the ones the Summary, Explorer and Releases pages compare.
 async function generationRuns() {
-  return latestRuns((await loadIndex()).filter((r) => r.kind === 'baseline' && GEN_TASKS[r.task]));
+  return latestRuns((await loadIndex()).filter((r) => r.kind === 'baseline' && !r.variant && GEN_TASKS[r.task]));
 }
 const GEN_TASKS = { 'text': 'Text', 'image-text': 'Image + text' };
 

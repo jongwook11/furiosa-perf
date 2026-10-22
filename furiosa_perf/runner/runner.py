@@ -17,7 +17,7 @@ from furiosa_perf.results.store import ENV_DIR, RUN_FILE, SERVER_LOG, prepare_ru
 from furiosa_perf.runner.env import Environment, device_label, freeze, power_settings
 from furiosa_perf.runner.monitor import HardwareMonitor, MonitorConfig
 from furiosa_perf.runner.server import APIServerManager
-from furiosa_perf.spec import Preset, Server
+from furiosa_perf.spec import Preset, Server, variant_label
 
 # Preset client name -> implementation.
 CLIENTS: dict[str, type[BenchmarkClient]] = {"vllm-bench": VllmBenchClient, "aiperf": AiperfClient}
@@ -39,6 +39,7 @@ class BenchmarkRunner:
         output_dir: Path,
         resume: bool = False,
         overwrite: bool = False,
+        variant: dict[str, Any] | None = None,
     ) -> None:
         """Resolve the run directory and the fields every record carries.
 
@@ -49,6 +50,8 @@ class BenchmarkRunner:
             output_dir: Root of the results tree.
             resume: Continue a run already in the run directory.
             overwrite: Replace a run already in the run directory.
+            variant: ``--server-arg`` options, already applied to ``server``; recorded, and
+                naming the run directory so the run sits next to the one without them.
         """
         self.environment = environment
         self.server = server
@@ -73,6 +76,7 @@ class BenchmarkRunner:
             "parallel": asdict(server.parallel),
             "backend": backend,
             "backend_version": backend_version,
+            "variant": variant or {},
         }
         self.run_dir = run_dir(
             output_dir.resolve(),  # clients run inside point directories, so relative paths would nest
@@ -83,6 +87,7 @@ class BenchmarkRunner:
             f"{backend}_{backend_version}",
             preset.task,
             self.model,
+            variant_label(variant or {}),
         )
 
     def execute(self, reuse_server: bool = False) -> list[Any]:

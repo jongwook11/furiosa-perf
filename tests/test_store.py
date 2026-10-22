@@ -46,6 +46,8 @@ def test_run_dir_layout() -> None:
     assert run_dir(Path("out"), "baseline", "RNGD", 4, "", "furiosa-llm_2026.4.0", "text", "m").parts[2] == (
         "RNGD_4_furiosa-llm_2026.4.0"
     )
+    variant = run_dir(Path("out"), "scenario", "RNGD", 1, "", "furiosa-llm_2026.4.0", "chat", "org/m", 'c={"a": 1}')
+    assert variant.name == "org--m__c=-a-1-"  # next to org--m, file-safe
 
 
 def do_test_existing_run(tmp_path: Path, resume: bool, overwrite: bool) -> Path:

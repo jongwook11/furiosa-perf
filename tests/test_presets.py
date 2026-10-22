@@ -11,6 +11,8 @@ from furiosa_perf.spec import (
     load_preset,
     parse_preset,
     parse_server,
+    parse_server_args,
+    variant_label,
 )
 
 
@@ -97,6 +99,17 @@ def test_preset_server_options_cannot_set_parallelism() -> None:
     server = parse_server({"backend": "vllm", "model": "m", "devices": 0}, Path("/env"))
     with pytest.raises(ValueError, match="parallelism comes from the server config"):
         apply_server_overrides(server, {"tensor-parallel-size": 2})
+
+
+def test_server_args_are_typed_and_named_for_the_run_directory() -> None:
+    """--server-arg reads values as YAML; the label lists the options in a stable order."""
+    args = parse_server_args(("--no-enable-prefix-caching", "max-num-seqs=64", "reasoning-parser=null"))
+
+    assert args == {"no-enable-prefix-caching": True, "max-num-seqs": 64, "reasoning-parser": None}
+    assert variant_label(args) == "max-num-seqs=64+no-enable-prefix-caching+reasoning-parser=null"
+    assert variant_label({}) == ""
+    with pytest.raises(ValueError, match="has no option name"):
+        parse_server_args(("=1",))
 
 
 def test_preset_of_another_kind_is_refused() -> None:

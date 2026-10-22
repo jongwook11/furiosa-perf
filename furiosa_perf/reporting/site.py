@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from furiosa_perf.results.store import RECORD_FILE, RUN_FILE, read_json
+from furiosa_perf.spec import variant_label
 
 VIEWER = resources.files("furiosa_perf.reporting") / "viewer"
 
@@ -47,6 +48,7 @@ def run_id(run: dict[str, Any]) -> str:
         run["kind"],
         run["task"],
         run["model"],
+        run["variant"],
         when,
     ]
     return re.sub(r"[^\w.+-]+", "-", "--".join(p for p in parts if p))
@@ -74,6 +76,7 @@ def _run(
     command: str,
     source: Path,
     points: list[dict[str, Any]],
+    variant: str = "",
     **extra: Any,
 ) -> dict[str, Any]:
     run = {
@@ -88,6 +91,7 @@ def _run(
         "ver": ver,
         "date": date,
         "flags": server_flags(command),
+        "variant": variant,  # --server-arg options of the run, e.g. no-enable-prefix-caching
         "source": str(source),
         **extra,
     }
@@ -118,6 +122,7 @@ def load_run(run_file: Path) -> dict[str, Any] | None:
         client=meta.get("client"),
         status=meta.get("status"),
         capacity=meta.get("capacity"),
+        variant=variant_label(meta.get("variant") or {}),
     )
 
 
