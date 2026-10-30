@@ -18,7 +18,7 @@ async function loadIndex() {
 function toPoint(raw) {
   const out = raw['Output Throughput(tok/s)'];
   return {
-    isl: raw['Input Tokens'], osl: raw['Output Tokens'], conc: raw['Concurrent'], out: out,
+    isl: raw['Input Tokens'], osl: raw['Output Tokens'], conc: raw['Concurrent'], out: out, total: raw['Total Throughput(tok/s)'],
     ttft50: raw['Median TTFT(s)'], ttft99: raw['P99 TTFT(s)'], tpot50: raw['Median TPOT(ms)'], tpot99: raw['P99 TPOT(ms)'],
     power: raw['mean_power'],
     // Results of the presets judge each point (ok); older ones only tell a failed point by no output.
@@ -138,16 +138,40 @@ function tpsPerKwAtSlo(pts, run, slo) {
   return { v: c[c.length - 1].y };
 }
 
-// One number per run and ISL/OSL pair, for the Summary and Releases pages.
+// Users at the SLO on an 8-card server (× 8 / devices measured), and on a rack of rackKw filled with
+// whole servers (the power left over stays unused). ge: the sweep's largest batch still met the SLO.
+const RACK_KW = 15;
+function usersPerServer(pts, run, slo) { const u = usersAtSlo(pts, slo); return u ? { v: u.v * 8 / run.n, ge: u.ge } : null; }
+function usersPerRack(pts, run, slo, rackKw) {
+  const kw = SERVER_KW[family(run.hw)], u = usersPerServer(pts, run, slo);
+  if (!kw || !u) return null;
+  const servers = Math.floor(rackKw / kw + 1e-9);
+  return { v: servers * u.v, ge: u.ge, servers: servers, perServer: u.v, kw: kw };
+}
+
+// One number per run and ISL/OSL pair, for the Summary and Releases pages: f(points, run, slo, rackKw).
+// bestN: a total scaled to a server, so the best device count of each side is compared. point: a measure
+// taken at every batch rather than reduced to one value.
 const METRICS = {
-  tpkw: { label: 'TPS per kW at SLO', title: 'Token Throughput per Kilowatt', higher: true, perDevice: true, slo: true, f: tpsPerKwAtSlo },
-  users: { label: 'Users at SLO / device', higher: true, perDevice: true, slo: true, f: (pts, r, slo) => { const u = usersAtSlo(pts, slo); return u ? { v: u.v / r.n, ge: u.ge } : null; } },
-  peak: { label: 'Peak output TPS / device', higher: true, perDevice: true, f: (pts, r) => { const p = peakPoint(pts); return p ? { v: p.out / r.n } : null; } },
-  tpw: { label: 'Output TPS / W at peak', higher: true, perDevice: true, f: (pts) => { const p = peakPoint(pts); return p && p.power > 0 ? { v: p.out / p.power } : null; } },
-  speed1: { label: 'TPS / User at c1', higher: true, f: (pts) => { const p = c1(pts); return p ? { v: p.out } : null; } },
-  tpot1: { label: 'TPOT p50 at c1 (ms)', higher: false, f: (pts) => { const p = c1(pts); return p ? { v: p.tpot50 } : null; } },
-  ttft1: { label: 'TTFT p50 at c1 (s)', higher: false, f: (pts) => { const p = c1(pts); return p ? { v: p.ttft50 } : null; } },
+  tpkw: { label: 'TPS per kW at SLO', title: 'Token Throughput per Kilowatt', higher: true, bestN: true, slo: true, f: tpsPerKwAtSlo },
+  rack: { label: 'Users per rack at SLO', higher: true, bestN: true, slo: true, rack: true, f: usersPerRack },
+  users: { label: 'Users at SLO · per 8-card server', higher: true, bestN: true, slo: true, f: usersPerServer },
+  // Measures with no one value per run: the pages list the models and draw `point` at every batch.
+  // f only picks each side's device count (the best at peak, or at b1).
+  tps: { label: 'Output TPS', higher: true, bestN: true, f: (pts) => { const p = peakPoint(pts); return p ? { v: p.out } : null; },
+    point: { label: 'Output TPS', f: (p) => p.out } },  // as measured on the run's devices
+  total: { label: 'Total TPS', higher: true, bestN: true, f: (pts) => { const p = peakPoint(pts); return p && p.total ? { v: p.total } : null; },
+    point: { label: 'Total TPS (input + output)', f: (p) => p.total } },  // as measured
+  out: { label: 'Output TPS · per 8-card server', higher: true, bestN: true, f: (pts, r) => { const p = peakPoint(pts); return p ? { v: p.out * 8 / r.n } : null; },
+    point: { label: 'Output TPS · per 8-card server', f: (p, r) => p.out * 8 / r.n } },
+  tpw: { label: 'Output TPS / W', higher: true, bestN: true, f: (pts) => { const p = peakPoint(pts); return p && p.power > 0 ? { v: p.out / p.power } : null; },
+    point: { label: 'Output TPS / W', f: (p) => (p.power > 0 ? p.out / p.power : null) } },
+  tpu: { label: 'TPS / User', higher: true, f: (pts) => { const p = c1(pts); return p ? { v: p.out } : null; }, point: { label: 'TPS / User', f: (p) => p.out / p.conc } },
+  tpot: { label: 'TPOT p50 (ms)', higher: false, f: (pts) => { const p = c1(pts); return p ? { v: p.tpot50 } : null; }, point: { label: 'TPOT p50 (ms)', f: (p) => p.tpot50 } },
+  ttft: { label: 'TTFT p50 (s)', higher: false, f: (pts) => { const p = c1(pts); return p ? { v: p.ttft50 } : null; }, point: { label: 'TTFT p50 (s)', f: (p) => p.ttft50 } },
 };
+// What an SLO metric was measured against, for titles: '' for the others.
+function metricBasis(M, slo, rackKw) { return (M.slo ? ' · SLO ' + slo + ' TPS/user' : '') + (M.rack ? ' · ' + rackKw + ' kW rack' : ''); }
 
 function median(xs) {
   xs = xs.slice().sort((a, b) => a - b);
@@ -178,6 +202,9 @@ function select(label, key, value, options, attrs) {
     return '<option value="' + esc(v) + '"' + (String(v) === String(value) ? ' selected' : '') + '>' + esc(l) + '</option>';
   }).join('');
   return '<label class="ctl">' + esc(label) + '<select data-k="' + key + '"' + (attrs || '') + '>' + opts + '</select></label>';
+}
+function rackInput(kw) {
+  return '<label class="ctl">Rack power · kW<input type="number" min="0.1" step="0.1" data-k="rack" data-num value="' + kw + '"></label>';
 }
 function sloInput(slo) {
   return '<label class="ctl">SLO · tok/s/user<input type="number" min="1" step="1" data-k="slo" data-num value="' + slo + '"></label>';
@@ -215,6 +242,67 @@ async function render() {
     if (ticket === RENDERING) app.innerHTML = '<div class="status">Could not load the data: ' + esc(e.message) + '</div>';
   }
 }
+// The measure of a single-point metric (M.point) at every batch, one bar per series in each batch's group,
+// with series[ratio[0]]'s multiple over series[ratio[1]] above the group (> 1: better, whichever way the
+// measure improves). series: [{ name, color, run }]; failed points are left out.
+function batchChart(M, series, ratio, isl, osl) {
+  const val = (s, c) => {
+    const p = pointsAt(s.run, isl, osl).filter((q) => q.ok && q.conc === c)[0], v = p ? M.point.f(p, s.run) : null;
+    return v === null || v === undefined || !isFinite(v) ? null : v;
+  };
+  const concs = [...new Set(series.flatMap((s) => pointsAt(s.run, isl, osl).map((p) => p.conc)))].sort((a, b) => a - b);
+  const rows = concs.map((c) => ({ c: c, v: series.map((s) => val(s, c)) })).filter((x) => x.v.some((v) => v !== null));
+  if (!rows.length) return '<div class="empty">No measured batches.</div>';
+  const W = 900, H = 230, L = 70, R = 880, T = 30, B = 190, yt = niceTicks(Math.max(...rows.flatMap((x) => x.v.map((v) => v || 0))) * 1.12);
+  const y = (v) => B - v / yt.top * (B - T), slot = (R - L) / rows.length, bw = Math.min(26, slot * 0.64 / series.length);
+  let s = '';
+  yt.list.forEach((v) => { s += '<line x1="' + L + '" x2="' + R + '" y1="' + y(v) + '" y2="' + y(v) + '" stroke="var(--grid)"/><text x="' + (L - 8) + '" y="' + (y(v) + 4) + '" text-anchor="end">' + fmt(v) + '</text>'; });
+  rows.forEach((x, i) => {
+    const cx = L + slot * (i + 0.5), x0 = cx - bw * series.length / 2;
+    const a = x.v[ratio[0]], b = x.v[ratio[1]], k = a > 0 && b > 0 ? (M.higher ? a / b : b / a) : null;
+    // The batch's values show on hover (data-tip), over a hit area as wide as its slot.
+    const tip = 'b' + x.c + '\n' + series.map((sr, j) => sr.name + '  ' + (x.v[j] === null ? '—' : fmt(x.v[j]))).join('\n') + (k === null ? '' : '\n' + k.toFixed(2) + '×');
+    s += '<g class="bgrp" data-tip="' + esc(tip) + '"><rect class="hit" x="' + (cx - slot / 2) + '" y="' + T + '" width="' + slot + '" height="' + (B - T) + '" fill="transparent"/>';
+    x.v.forEach((v, j) => {
+      if (v !== null) s += '<rect x="' + (x0 + bw * j + 1) + '" y="' + y(v) + '" width="' + (bw - 2) + '" height="' + (B - y(v)) + '" fill="' + series[j].color + '"/>';
+    });
+    s += '</g>';
+    const top = Math.min(...x.v.map((v) => (v === null ? B : y(v))));
+    if (k !== null) s += '<text class="mult-s" x="' + cx + '" y="' + (top - 8) + '" text-anchor="middle" style="fill:' + (k > 1.02 ? 'var(--accent)' : k < 0.98 ? 'var(--muted)' : 'var(--text)') + '">' + k.toFixed(2) + '×</text>';  // ±2%: no change
+    s += '<text x="' + cx + '" y="' + (B + 18) + '" text-anchor="middle">b' + x.c + '</text>';
+  });
+  s += '<line x1="' + L + '" x2="' + R + '" y1="' + B + '" y2="' + B + '" stroke="var(--faint)"/>'
+    + '<text class="axis-title" transform="translate(14 ' + (T + B) / 2 + ') rotate(-90)" text-anchor="middle">' + esc(M.point.label.toUpperCase()) + '</text>'
+    + '<text class="axis-title" x="' + (L + R) / 2 + '" y="' + (H - 4) + '" text-anchor="middle">BATCH (CONCURRENCY)</text>';
+  const legend = '<div class="legend">' + series.map((x) => '<span><span class="swatch" style="background:' + x.color + '"></span>' + esc(x.name) + '</span>').join('')
+    + (series.length > 1 ? '<span class="faint">× = ' + esc(series[ratio[0]].name) + ' vs ' + esc(series[ratio[1]].name) + '</span>' : '') + '</div>';
+  return legend + '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="' + esc(M.point.label) + ' by batch">' + s + '</svg>';
+}
+
+// [data-tip]: its text in a box that follows the pointer.
+function showTip(e) {
+  let box = document.getElementById('tip');
+  const el = e.target.closest && e.target.closest('[data-tip]');
+  if (!el) { if (box) box.hidden = true; return; }
+  if (!box) { box = document.createElement('div'); box.id = 'tip'; box.className = 'tip'; document.body.appendChild(box); }
+  box.textContent = el.dataset.tip;
+  box.hidden = false;
+  const left = e.clientX + 16 + box.offsetWidth > innerWidth ? e.clientX - 16 - box.offsetWidth : e.clientX + 16;
+  box.style.left = left + scrollX + 'px';
+  box.style.top = e.clientY + scrollY - box.offsetHeight / 2 + 'px';
+}
+
+// One-of-many picker drawn as tiles (radio buttons bound to state[key], so the pick is kept in the link).
+// items: [{ key, name, sub }]; returns the picked key (state[key] if it is one of the items, else dflt).
+function pickedKey(st, key, items, dflt) { return items.some((x) => x.key === st[key]) ? st[key] : dflt; }
+function pickTiles(key, items, pick) {
+  return '<div class="tiles">' + items.map((x) => {
+    const on = x.key === pick;
+    return '<label class="tile' + (on ? ' on' : '') + '"><input type="radio" name="' + key + '" data-k="' + key + '" value="' + esc(x.key) + '"' + (on ? ' checked' : '') + '>'
+      + '<span class="name">' + esc(x.name) + '</span><span class="sub">' + esc(x.sub || '') + '</span></label>';
+  }).join('') + '</div>';
+}
+
 function start() {
   const app = document.getElementById('app');
   app.addEventListener('change', (e) => {
@@ -222,6 +310,7 @@ function start() {
     if (el.dataset.k) setState({ [el.dataset.k]: el.dataset.num !== undefined ? (+el.value > 0 ? +el.value : undefined) : el.value });
     else if (el.dataset.toggle !== undefined) PAGES[PAGE].toggle(el.dataset.toggle, el.checked);
   });
+  document.addEventListener('pointermove', showTip);
   window.addEventListener('hashchange', () => { readHash(); render(); });
   readHash();
   render();

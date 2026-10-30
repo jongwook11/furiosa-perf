@@ -24,25 +24,26 @@ PAGES.releases = async function (st) {
   const scen = pickShape(st.scen, scens);
   const metric = METRICS[st.metric] ? st.metric : 'tpkw';
   const M = METRICS[metric];
-  const slo = st.slo > 0 ? st.slo : 20;
+  const slo = st.slo > 0 ? st.slo : 20, rackKw = +st.rack > 0 ? +st.rack : RACK_KW;
   const controls = '<div class="controls">'
     + select('Devices', 'dev', dev, [{ v: 'all', label: 'All device counts' }].concat(devs.map((n) => ({ v: String(n), label: 'RNGD ×' + n }))))
     + select('Task', 'task', task, tasks.map((t) => ({ v: t, label: GEN_TASKS[t] })))
     + select('ISL / OSL', 'scen', scen, scens)
     + select('Metric', 'metric', metric, Object.keys(METRICS).map((k) => ({ v: k, label: METRICS[k].label })))
-    + (M.slo ? sloInput(slo) : '') + '</div>';
+    + (M.slo ? sloInput(slo) : '') + (M.rack ? rackInput(rackKw) : '') + '</div>';
   if (!scen) return '<h1>Releases</h1>' + controls + '<div class="status">No RNGD results.</div>';
 
   await loadPoints(sel);
   const [isl, osl] = scen.split('/').map(Number);
   // One row per model × device count, one column per release.
-  const vers = [], byRow = {}, flags = {}, dates = {};
+  const vers = [], byRow = {}, runsOf = {}, flags = {}, dates = {};
   sel.forEach((r) => {
-    const pts = pointsAt(r, isl, osl), m = pts.length ? M.f(pts, r, slo) : null;
+    const pts = pointsAt(r, isl, osl), m = pts.length ? M.f(pts, r, slo, rackKw) : null;
     if (!m || !(m.v > 0)) return;
     if (vers.indexOf(r.ver) < 0) vers.push(r.ver);
     const k = r.model + '|' + r.n;
     (byRow[k] = byRow[k] || {})[r.ver] = m;
+    (runsOf[k] = runsOf[k] || {})[r.ver] = r;
     flags[r.ver] = flags[r.ver] || {};
     (r.flags || []).forEach((f) => { flags[r.ver][f] = 1; });
     if (r.date && (!dates[r.ver] || r.date < dates[r.ver])) dates[r.ver] = r.date;
@@ -62,7 +63,7 @@ PAGES.releases = async function (st) {
     });
     if (first === prev) return;  // measured on one release only
     const [model, n] = k.split('|');
-    rows.push({ model: model, n: +n, vals: vals, steps: steps, total: better(vals[first], vals[prev]), first: first, last: prev });
+    rows.push({ key: k, model: model, n: +n, vals: vals, steps: steps, total: better(vals[first], vals[prev]), first: first, last: prev });
   });
   rows.sort((a, b) => b.total - a.total || a.model.localeCompare(b.model));
 
@@ -101,8 +102,22 @@ PAGES.releases = async function (st) {
       sub: esc(short(r.first) + ' → ' + short(r.last)), subColor: 'var(--faint)' });
   });
 
-  const unit = M.label + (M.slo ? ' · TPS per user ' + slo : '');
+  const unit = M.label + metricBasis(M, slo, rackKw);
   const red = (v) => (v > 1.02 ? 'var(--accent)' : 'var(--title)');
+  if (M.point) {
+    // No one value per release: pick a model from the tiles (the first by default); it is drawn at every batch,
+    // one bar per release (oldest first, the newest in the brand red), the newest over the one before above each batch.
+    const sorted = rows.slice().sort((a, b) => a.model.localeCompare(b.model) || a.n - b.n);
+    const relsOf = (r) => vers.filter((v) => runsOf[r.key][v]), sub = (r) => 'RNGD ×' + r.n + ' · ' + relsOf(r).map(short).join(', ');
+    const items = sorted.map((r) => ({ key: r.key, name: r.model, sub: sub(r) })), pick = sorted.length ? pickedKey(st, 'pick', items, items[0].key) : null;
+    const r0 = sorted.filter((r) => r.key === pick)[0], rv = r0 ? relsOf(r0) : [];
+    const series = rv.map((v, j) => ({ name: short(v), color: 'var(--c-red-' + Math.min(3, rv.length - 1 - j) + ')', run: runsOf[r0.key][v] }));
+    const list = !r0 ? '' : pickTiles('pick', items, pick) + '<div class="picked"><h3>' + esc(r0.model) + ' <span class="faint mono">' + esc(sub(r0)) + '</span></h3>'
+      + batchChart(M, series, [series.length - 1, series.length - 2], isl, osl) + '</div>';
+    return '<div class="head"><h1>Releases</h1>' + controls + '</div><section class="kpis">' + kpi('Models on two or more releases', rows.length) + '</section>'
+      + '<section class="panel"><div class="panel-head"><h2>' + esc('furiosa-llm releases · ' + unit + ' · ' + scen + ' · pick a model for every batch') + '</h2></div>'
+      + (list || '<div class="empty">No RNGD model was measured on two or more releases for this selection.</div>') + '</section>';
+  }
   return '<div class="head"><h1>Releases</h1>' + controls + '</div>'
     + '<section class="kpis">'
     + kpi('Latest release · ' + (prevVer || '—') + ' → ' + (latest || '—') + ' · median', times(stepMed[latest]), red(stepMed[latest]))

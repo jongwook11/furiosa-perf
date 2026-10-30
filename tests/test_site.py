@@ -1,7 +1,11 @@
 """Tests for collecting results into the report site's data files."""
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from furiosa_perf.reporting.site import collect_runs, write_data, write_viewer
 
@@ -97,3 +101,23 @@ def test_site_has_an_index_and_one_file_per_run(tmp_path: Path) -> None:
     assert points["cols"][:4] == ["Input Tokens", "Output Tokens", "Concurrent", "Output Throughput(tok/s)"]
     assert points["rows"][1][3] == 0
     assert (site / "index.html").exists() and (site / "theme" / "theme.css").exists()
+
+
+FORMULA_CHECK = """
+const vm = require('vm'), fs = require('fs'), assert = require('assert');
+const c = { PAGES: {}, Math, Object }; vm.createContext(c);
+vm.runInContext(fs.readFileSync('common.js', 'utf8') + fs.readFileSync('explorer.js', 'utf8') + ';this.cf = compileFormula;', c);
+const ev = (s, v) => { const r = c.cf(s); return JSON.stringify([r.f(v), r.params]); };
+assert.strictEqual(ev('out / n * 8 / a', { out: 800, n: 4, a: 2 }), '[800,["a"]]');
+assert.strictEqual(ev('a + b * 3 + c', { a: 1, b: 2, c: 3 }), '[10,["a","b","c"]]');
+assert.strictEqual(ev('-2^2', {}), '[-4,[]]');
+assert.strictEqual(ev('max(out, 1e3) / (conc - 1)', { out: 5, conc: 3 }), '[500,[]]');
+for (const bad of ['out +', '(out', 'alert(1)', 'constructor(1)', 'a.constructor', '']) assert.throws(() => c.cf(bad), undefined, bad);
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_custom_formula_is_parsed_not_evaluated():
+    """The Explorer's custom Y formula comes from the URL: arithmetic and known functions only, never code."""
+    viewer = Path(__file__).parents[1] / "furiosa_perf" / "reporting" / "viewer"
+    subprocess.run(["node", "-e", FORMULA_CHECK], cwd=viewer, check=True)

@@ -8,7 +8,7 @@ PAGES.summary = async function (st) {
   const tRuns = all.filter((r) => r.task === task);
   const scens = shapeOptions(tRuns);
   const scen = pickShape(st.scen, scens);
-  const slo = st.slo > 0 ? st.slo : 20;
+  const slo = st.slo > 0 ? st.slo : 20, rackKw = +st.rack > 0 ? +st.rack : RACK_KW;
 
   // Platforms that measured this ISL/OSL pair.
   const plats = {};
@@ -30,7 +30,7 @@ PAGES.summary = async function (st) {
     + select('RNGD', 'rngd', rngd, rngdKeys.map(opt))
     + select('Compare with', 'gpu', gpu, gpuKeys.map(opt))
     + select('Metric', 'metric', metric, Object.keys(METRICS).map((k) => ({ v: k, label: METRICS[k].label })))
-    + (M.slo ? sloInput(slo) : '') + '</div>';
+    + (M.slo ? sloInput(slo) : '') + (M.rack ? rackInput(rackKw) : '') + '</div>';
   if (!rngd || !scen) return '<div class="head"><h1>Summary</h1>' + controls + '</div><div class="status">No RNGD results for this task.</div>';
 
   const sel = tRuns.filter((r) => platformKey(r) === rngd || platformKey(r) === gpu);
@@ -39,21 +39,28 @@ PAGES.summary = async function (st) {
   // Best device count per model and side.
   const best = {};
   sel.forEach((r) => {
-    const m = M.f(pointsAt(r, isl, osl), r, slo);
+    const m = M.f(pointsAt(r, isl, osl), r, slo, rackKw);
     if (!m) return;
     const slot = (best[r.model] = best[r.model] || {}), side = platformKey(r) === rngd ? 'r' : 'g', cur = slot[side];
-    if (!cur || (M.higher ? m.v > cur.v : m.v < cur.v)) slot[side] = { v: m.v, n: r.n, ge: !!m.ge };
+    if (!cur || (M.higher ? m.v > cur.v : m.v < cur.v)) slot[side] = { v: m.v, n: r.n, ge: !!m.ge, run: r };
   });
   // ratio > 1 always means RNGD is better, whichever direction the metric improves in.
-  const list = Object.keys(best).filter((m) => best[m].r).map((m) => {
+  // Only models both sides measured: a model without the compared GPU has nothing to compare.
+  const list = Object.keys(best).filter((m) => best[m].r && best[m].g).map((m) => {
     const r = best[m].r, g = best[m].g;
     const ratio = !g || !(g.v > 0) || !(r.v > 0) ? null : M.higher ? r.v / g.v : g.v / r.v;
     return { model: m, r: r, g: g, ratio: ratio };
   });
-  list.sort((a, b) => (b.ratio === null ? -1 : b.ratio) - (a.ratio === null ? -1 : a.ratio) || a.model.localeCompare(b.model));
+  list.sort((a, b) => (M.point ? 0 : (b.ratio === null ? -1 : b.ratio) - (a.ratio === null ? -1 : a.ratio)) || a.model.localeCompare(b.model));
 
   const label = (x) => (x ? (x.ge ? '≥' : '') + fmt(x.v) + '  ×' + x.n : '—');
-  const rows = list.map((x) => {
+  // No one value (M.point): pick a model from the tiles (the first by default); it is drawn at every batch.
+  const sub = (x) => 'RNGD ×' + x.r.n + ' · ' + x.g.run.hw + ' ×' + x.g.n;
+  const items = list.map((x) => ({ key: x.model, name: x.model, sub: sub(x) })), pick = M.point && list.length ? pickedKey(st, 'pick', items, items[0].key) : null;
+  const x0 = list.filter((x) => x.model === pick)[0];
+  const byBatch = !x0 ? '' : pickTiles('pick', items, pick) + '<div class="picked"><h3>' + esc(x0.model) + ' <span class="faint mono">' + esc(sub(x0)) + '</span></h3>'
+    + batchChart(M, [{ name: 'RNGD ×' + x0.r.n, color: 'var(--c-red-0)', run: x0.r.run }, { name: x0.g.run.hw + ' ×' + x0.g.n, color: 'var(--g-a)', run: x0.g.run }], [0, 1], isl, osl) + '</div>';
+  const rows = M.point ? '' : list.map((x) => {
     // Each row is scaled to its own longer bar (models differ in size by 10× or more; the values are on the right).
     // Bars use up to 85% of the track so the multiplier written past the longer bar still fits.
     const rowMax = Math.max(x.r.v, x.g ? x.g.v : 0);
@@ -72,17 +79,19 @@ PAGES.summary = async function (st) {
 
   const compared = list.filter((x) => x.ratio !== null);
   const med = median(compared.map((x) => x.ratio));
-  const title = (M.title ? M.title + ' · TPS per user ' + slo : M.label) + (M.perDevice ? ' · best device count' : '') + (M.higher ? '' : ' · lower is better');
-  const caption = metric === 'tpkw'
-    ? 'Tokens per second per kW at ' + slo + ' TPS per user, ' + scen + ' ISL/OSL. Per-device throughput scaled to 8-card server power (RNGD 3.0 kW, RTX PRO 6000 6.5 kW, H100/H200 10.2 kW assumed). ≥ marks a system still faster than ' + slo + ' TPS per user at its highest measured concurrency.'
-    : '';
+  const title = (M.title || M.label) + metricBasis(M, slo, rackKw) + (M.bestN ? ' · best device count' : '') + (M.higher ? '' : ' · lower is better') + (M.point ? ' · pick a model for every batch' : '');
+  const servers = '8-card server power (RNGD 3.0 kW, RTX PRO 6000 6.5 kW, H100/H200 10.2 kW assumed)';
+  const bound = ' ≥ marks a system still faster than ' + slo + ' TPS per user at its largest measured batch.';
+  const caption = metric === 'tpkw' ? 'Tokens per second per kW at ' + slo + ' TPS per user, ' + scen + ' ISL/OSL. Per-device throughput scaled to ' + servers + '.' + bound
+    : metric === 'rack' ? 'Users at ≥ ' + slo + ' TPS per user that a ' + rackKw + ' kW rack serves, ' + scen + ' ISL/OSL: whole servers per rack from ' + servers + ', × users per server.' + bound
+    : M.slo ? 'Users at ≥ ' + slo + ' TPS per user, scaled to an 8-card server (× 8 / devices measured).' + bound : '';
   return '<div class="head"><div><h1>' + esc(platformLabel(rngd)) + '</h1><div class="sub">vs ' + esc(gpu ? platformLabel(gpu) : '—') + ' · '
-    + esc(GEN_TASKS[task].toLowerCase() + ' ' + scen + (M.slo ? ' · SLO ' + slo + ' tok/s/user' : '')) + '</div></div>' + controls + '</div>'
-    + '<section class="kpis">' + kpi('Models compared', compared.length) + kpi('RNGD ahead', compared.filter((x) => x.ratio >= 1).length + ' / ' + compared.length, 'var(--accent)')
-    + kpi('Median RNGD advantage', med === null ? '—' : med.toFixed(2) + '×') + '</section>'
+    + esc(GEN_TASKS[task].toLowerCase() + ' ' + scen + metricBasis(M, slo, rackKw)) + '</div></div>' + controls + '</div>'
+    + '<section class="kpis">' + kpi('Models compared', M.point ? list.length : compared.length)
+    + (M.point ? '' : kpi('RNGD ahead', compared.filter((x) => x.ratio >= 1).length + ' / ' + compared.length, 'var(--accent)') + kpi('Median RNGD advantage', med === null ? '—' : med.toFixed(2) + '×')) + '</section>'
     + '<section class="panel"><div class="panel-head"><h2>' + esc(title) + '</h2><div class="legend">'
-    + '<span><span class="swatch" style="background:var(--c-rngd-a)"></span>' + esc(platformLabel(rngd)) + '</span>'
+    + '<span><span class="swatch" style="background:var(--c-red-0)"></span>' + esc(platformLabel(rngd)) + '</span>'
     + '<span><span class="swatch" style="background:var(--g-a)"></span>' + esc(gpu ? platformLabel(gpu) : '—') + '</span></div></div>'
-    + (rows || '<div class="empty">No RNGD points for this task and ISL/OSL.</div>')
+    + ((M.point ? byBatch : rows) || '<div class="empty">No RNGD points for this task and ISL/OSL.</div>')
     + (caption ? '<p class="caption">' + esc(caption) + '</p>' : '') + '</section>';
 };

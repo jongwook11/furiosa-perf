@@ -346,11 +346,13 @@ The viewer only fetches the runs a page shows, so the site stays fast as results
 
 | Page | Shows |
 |---|---|
-| Summary | RNGD against one GPU platform: one metric per model at one ISL/OSL (throughput per kW at an SLO, users at SLO, peak TPS, TPS/W, single-user TPOT/TTFT) |
-| Explorer | Any two metrics of one model's runs against each other, one curve per hardware, device count and version |
-| Releases | One RNGD metric per model across furiosa-llm releases, with the change from the previous release |
+| Summary | RNGD against one GPU platform at one ISL/OSL. Metrics with one value per run (throughput per kW, users per rack and users per 8-card server at an SLO) as a bar per model; the others (output and total TPS, TPS/W, TPS per user, TPOT, TTFT) at every batch of the model picked from the tiles |
+| Explorer | One model's runs: TPS per user or concurrency (X) against a measure (Y), or a custom formula with parameters per hardware × device count; one curve per hardware, device count and version, every batch marked. Measures as run, or scaled to an 8-card server. A pointer readout, users per rack at the SLO as bars, a table per measure, and SVG/PNG downloads of the charts |
+| Releases | RNGD across furiosa-llm releases: one-value metrics per model with the change from the previous release, the others at every batch of the model picked from the tiles |
 | Variants | Scenario runs repeated with `--server-arg`, next to the run as configured: capacity within the SLO and point values at a load every run measured |
-| Data | Every run with its point counts, server flags and variant; each run's points as JSON, the filtered list as CSV |
+| Data | Every run with its point counts, server flags and variant; each run's points as JSON, the filtered list as CSV, and per model one CSV of every point of its runs |
+
+Users per rack = whole 8-card servers a rack's power holds (RNGD 3.0 kW, RTX PRO 6000 6.5 kW, H100/H200 10.2 kW assumed; 15 kW rack by default) × users per server at the SLO.
 
 The page and its controls are in the URL, so a view can be shared as a link. Summary, Explorer and Releases compare fixed-length `text` and `image-text` runs; the Data page lists every run.
 
