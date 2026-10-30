@@ -296,7 +296,7 @@ results/
             ├── devices.csv               # 1 Hz: one row per device (power, temperatures, utilization, clocks, throttle)
             ├── metrics_snapshots.jsonl   # full /metrics text and NPU counters at every point start and end
             └── i<ISL>-o<OSL>-c<CONC>/    # one directory per point (i<ISL>-b<DOCS>-c<CONC> for rerank, i<ISL>-c<CONC> for embedding)
-                ├── record.json           # the point, self-describing: model, hardware, versions, options, ok, metrics
+                ├── record.json           # the point, self-describing: model, hardware, versions, options, client command, ok, metrics
                 ├── result.json           # raw vllm bench result
                 ├── bench.log             # client console output
                 └── monitor.csv  devices.csv   # the rows of this point
