@@ -387,6 +387,7 @@ PAGES.explorer = async function (st) {
     w: RW, h: RH, title: 'Users per rack at SLO', subtitle: subtitle + metricBasis(METRICS.rack, slo, rackKw), legend: [],
     file: (fileBase + '_rack-users_slo' + slo + '_' + rackKw + 'kW').replace(/[^\w.-]+/g, '-'),
   };
+  const showRack = st.rackview === 'show';  // off by default: only when the viewer asks for it
   const rackPanel = '<div class="panel rack"><div class="panel-head"><div><h2 style="font-weight:400;font-size:18px">Rack capacity at SLO</h2>'
     + '<div class="muted">Users served at ≥ ' + slo + ' TPS per user by one rack, filled with 8-card servers · ISL ' + isl + ' / OSL ' + osl + '</div></div>'
     + '<div class="controls">' + rackInput(rackKw) + sloInput(slo) + downloads('rack') + '</div></div>'
@@ -416,11 +417,12 @@ PAGES.explorer = async function (st) {
     + '<div class="ctl">Hardware · backend' + seriesList + '</div>'
     + '</aside><section><div class="controls">' + select('X axis', 'x', xKey, axisOptions(X_KEYS)) + select('Y axis', 'y', yKey, axisOptions(Y_KEYS))
     + select('Scale', 'scale', SCALE8 ? '8card' : 'measured', [{ v: 'measured', label: 'As measured' }, { v: '8card', label: 'Per 8-card server' }]) + (sloOnX ? sloInput(slo) : '')
-    + (showVs ? select('× RNGD vs', 'vs', vsG ? vsG.o.r.id : 'none', [{ v: 'none', label: 'None' }].concat(gpuGs.map((g) => ({ v: g.o.r.id, label: g.o.label })))) : '') + '</div>'
+    + (showVs ? select('× RNGD vs', 'vs', vsG ? vsG.o.r.id : 'none', [{ v: 'none', label: 'None' }].concat(gpuGs.map((g) => ({ v: g.o.r.id, label: g.o.label })))) : '')
+    + select('Rack capacity', 'rackview', showRack ? 'show' : 'hide', [{ v: 'hide', label: 'Hide' }, { v: 'show', label: 'Show' }]) + '</div>'
     + '<div class="panel"><div class="panel-head"><div><h2 style="font-weight:400;font-size:18px">' + esc(my.title || my.label()) + '</h2><div class="muted">ISL ' + isl + ' / OSL ' + osl + ' · ' + esc(GEN_TASKS[task].toLowerCase()) + '</div></div>'
     + downloads('main') + '</div>' + legend
     + '<div class="chart-wrap"><svg class="chart" data-chart="main" viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="' + esc(my.label() + ' against ' + mx.label() + ' for ' + model) + '">' + svg + '<g class="hover"></g></svg><div class="hover-tip" hidden></div></div>'
-    + '<p class="caption">' + esc(caption) + '</p></div>' + rackPanel + customPanel
+    + '<p class="caption">' + esc(caption) + '</p></div>' + (showRack ? rackPanel : '') + customPanel
     + '<div class="panel batches"><div class="panel-head"><h2 style="font-weight:400;font-size:18px">Measured batches</h2><span class="muted">ISL ' + isl + ' / OSL ' + osl + ' · pick a metric, failed points greyed</span></div>'
     + tables + '</div></section></div>';
 };

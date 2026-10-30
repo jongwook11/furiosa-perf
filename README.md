@@ -347,7 +347,7 @@ The viewer only fetches the runs a page shows, so the site stays fast as results
 | Page | Shows |
 |---|---|
 | Summary | RNGD against one GPU platform at one ISL/OSL. Metrics with one value per run (throughput per kW, users per rack and users per 8-card server at an SLO) as a bar per model; the others (output and total TPS, TPS/W, TPS per user, TPOT, TTFT) at every batch of the model picked from the tiles |
-| Explorer | One model's runs: TPS per user or concurrency (X) against a measure (Y), or a custom formula with parameters per hardware × device count; one curve per hardware, device count and version, every batch marked. Measures as run, or scaled to an 8-card server. A pointer readout, users per rack at the SLO as bars, a table per measure, and SVG/PNG downloads of the charts |
+| Explorer | One model's runs: TPS per user or concurrency (X) against a measure (Y), or a custom formula with parameters per hardware × device count; one curve per hardware, device count and version, every batch marked. Measures as run, or scaled to an 8-card server. A pointer readout, users per rack at the SLO as bars (on request), a table per measure, and SVG/PNG downloads of the charts |
 | Releases | RNGD across furiosa-llm releases: one-value metrics per model with the change from the previous release, the others at every batch of the model picked from the tiles |
 | Variants | Scenario runs repeated with `--server-arg`, next to the run as configured: capacity within the SLO and point values at a load every run measured |
 | Data | Every run with its point counts, server flags and variant; each run's points as JSON, the filtered list as CSV, and per model one CSV of every point of its runs |
