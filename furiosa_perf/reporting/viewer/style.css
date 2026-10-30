@@ -89,7 +89,8 @@ table.list .date { font-family: var(--mono); white-space: nowrap; }
 .chart text { font-family: var(--mono); font-size: 12px; fill: var(--faint); }
 .chart .axis-title { font-family: var(--font); fill: var(--muted); letter-spacing: 0.04em; }
 .chart-legend { gap: 8px 24px; }
-.chart-legend > span { display: inline-flex; align-items: center; gap: 8px; }
+.chart-legend > span, .chart-legend > a { display: inline-flex; align-items: center; gap: 8px; }
+.chart-legend a.run-link { color: var(--muted); text-decoration: none; } .chart-legend a.run-link:hover b { text-decoration: underline; }
 .chart-legend b { color: var(--text); font-weight: 500; font-size: 13px; }
 .custom-y .custom-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
 .custom-y .grow { flex: 1 1 320px; }
@@ -142,3 +143,15 @@ button.tile { background: none; color: var(--text); font: inherit; text-align: l
 .chart .mult-s { font-size: 11px; font-weight: 600; }
 .chart .bgrp:hover .hit { fill: var(--panel2); }
 .tip { position: absolute; z-index: 5; pointer-events: none; white-space: pre; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font: 12px/1.5 var(--mono); color: var(--text); box-shadow: 0 6px 24px rgba(0, 0, 0, .5); }
+/* Run details */
+.run-page { display: flex; flex-direction: column; gap: 20px; }
+.run-page h1 { margin: 6px 0 0; } .run-page a { color: var(--muted); }
+pre.cmd { margin: 0; padding: 14px 16px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: 13px/1.6 var(--mono); color: var(--text); white-space: pre-wrap; word-break: break-all; }
+pre.json { margin: 0; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; color: var(--text); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+.chips code { font: 11px var(--mono); color: var(--muted); background: var(--panel2); border-radius: 10px; padding: 3px 9px; }
+.kv { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 8px 16px; margin: 0; font-size: 13px; } .kv dt { color: var(--muted); } .kv dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+.note { border-left: 3px solid var(--ui-yellow-300); padding: 8px 12px; color: var(--muted); font-size: 13px; background: rgba(241, 237, 0, 0.05); }
+.btn { font: 12px var(--font); color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--muted); }
+td.own { font-size: 12px; white-space: normal; overflow-wrap: anywhere; min-width: 320px; }

@@ -50,7 +50,7 @@ PAGES.data = async function (st) {
     + '<td class="date">' + day(r.date) + '</td><td class="num">' + r.num_points + '</td>'
     + '<td class="num" style="color:' + (r.failed ? 'var(--fail)' : 'var(--faint)') + '">' + r.failed + '</td>'
     + '<td class="muted">' + esc((r.flags || []).join(' ')) + '</td><td>' + esc(r.variant || '') + '</td>'
-    + '<td><a href="data/runs/' + encodeURIComponent(r.id) + '.json" download>JSON</a></td></tr>').join('');
+    + '<td><a href="#run?id=' + encodeURIComponent(r.id) + '">Details</a> · <a href="data/runs/' + encodeURIComponent(r.id) + '.json" download>JSON</a></td></tr>').join('');
   return '<div class="head"><h1>Data</h1><div class="controls">'
     + select('Kind', 'kind', st.kind || '', any('All').concat(uniq('kind')))
     + select('Task', 'dtask', st.dtask || '', any('All').concat(uniq('task')))

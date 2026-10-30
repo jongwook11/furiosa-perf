@@ -9,6 +9,7 @@ result into a summary row.
 """
 
 import os
+import shlex
 import signal
 import subprocess
 from collections import defaultdict
@@ -302,6 +303,7 @@ class BenchmarkClient:
             "client_version": self.VERSION,
             "name": name,
             "point": point,
+            "command": shlex.join(command),  # as run, so the report can show how the point was measured
             "started": started,
             "finished": datetime.now(timezone.utc).isoformat(),
             "summary": row,

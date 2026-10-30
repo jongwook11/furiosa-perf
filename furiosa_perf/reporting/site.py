@@ -5,7 +5,8 @@ Site layout::
     index.html  style.css  *.js     the viewer (furiosa_perf/reporting/viewer), copied as is
     theme/                          optional look of the site (``--theme``): theme.css and its assets
     data/index.json                 every run: what it measured, on what, and how many points
-    data/runs/<run id>.json         the points of one run, loaded by the viewer when it needs them
+    data/runs/<run id>.json         the points of one run, loaded by the viewer when it needs them,
+                                    and how it was run (server command, environment, client command per point)
 
 Runs come from the results tree (``run.json`` + ``<point>/record.json``) and from results
 written before it (``bench_space``: ``<device>_<n>_<backend>_<version>/<tool>/<task>/<model>/summary.csv``).
@@ -32,6 +33,18 @@ LEGACY_RUN_DIR = re.compile(r"^(?P<hw>.+?)_(?P<n>\d+)_(?P<backend>[^_]+)_(?P<ver
 # Server flags worth showing next to a run (feature switches, not plumbing like ports or devices).
 FLAG = re.compile(r"--((?:enable|experimental|disable)[\w-]*)")
 IGNORED_FLAGS = {"enable-payload-logging"}
+
+
+# A bench_space point's client command, recovered from the run log (results from before record.json kept it).
+COMMAND_FILE = "command.txt"
+# What a bench_space point's vllm bench result records about how it was run.
+LEGACY_PARAMS = ("max_concurrency", "num_prompts", "request_rate", "duration", "completed", "failed")
+LEGACY_ENV = ("Ubuntu Version", "Python Version", "Framework Version", "Device Info", "Model Info")
+
+
+def _point_key(isl: Any, osl: Any, concurrency: Any) -> str:
+    """Key of a point in a run's details, as the viewer finds it: ``<isl>/<osl>/<concurrency>``."""
+    return f"{isl}/{osl}/{concurrency}"
 
 
 def server_flags(command: str) -> list[str]:
@@ -77,6 +90,7 @@ def _run(
     source: Path,
     points: list[dict[str, Any]],
     variant: str = "",
+    details: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     run = {
@@ -96,7 +110,7 @@ def _run(
         **extra,
     }
     run["id"] = run_id(run)
-    return run | {"points": points}
+    return run | {"points": points, "details": details or {}}
 
 
 def load_run(run_file: Path) -> dict[str, Any] | None:
@@ -104,7 +118,11 @@ def load_run(run_file: Path) -> dict[str, Any] | None:
     meta = read_json(run_file)
     if meta is None:
         return None
-    records = [read_json(p) for p in sorted(run_file.parent.glob(f"*/{RECORD_FILE}"))]
+    records = [r for r in (read_json(p) for p in sorted(run_file.parent.glob(f"*/{RECORD_FILE}"))) if r]
+
+    def key(record: dict[str, Any]) -> str:
+        return _point_key(*(record.get("summary", {}).get(k) for k in ("Input Tokens", "Output Tokens", "Concurrent")))
+
     return _run(
         # results from before the renames
         kind={"simulation": "scenario"}.get(meta["kind"], meta["kind"]),
@@ -118,7 +136,13 @@ def load_run(run_file: Path) -> dict[str, Any] | None:
         date=meta.get("started"),
         command=(meta.get("server") or {}).get("command", ""),
         source=run_file.parent,
-        points=[r["summary"] for r in records if r and "summary" in r],
+        points=[r["summary"] for r in records if "summary" in r],
+        details={
+            "server_command": (meta.get("server") or {}).get("command", ""),
+            "environment": meta.get("environment") or {},
+            "commands": {key(r): r["command"] for r in records if r.get("command")},
+            "params": {key(r): r["point"] for r in records if r.get("point")},
+        },
         client=meta.get("client"),
         status=meta.get("status"),
         capacity=meta.get("capacity"),
@@ -157,7 +181,30 @@ def load_legacy_run(summary: Path) -> dict[str, Any] | None:
         command=meta.get("API Server Command", ""),
         source=summary.parent,
         points=points,
+        details=_legacy_details(meta, model_dir),
     )
+
+
+def _legacy_details(meta: dict[str, str], model_dir: Path) -> dict[str, Any]:
+    """How a bench_space run was run: its summary.csv header, and per point (``<isl>.<osl>.<concurrency>/``)
+    the recovered client command and what the vllm bench result recorded."""
+    commands, params = {}, {}
+    for point_dir in sorted(p for p in model_dir.iterdir() if p.is_dir()):
+        parts = point_dir.name.split(".")
+        if len(parts) != 3 or not all(p.isdigit() for p in parts):
+            continue
+        key = _point_key(*parts)
+        if (point_dir / COMMAND_FILE).exists():
+            commands[key] = (point_dir / COMMAND_FILE).read_text().strip()
+        result = next((r for r in map(read_json, sorted(point_dir.glob("*.json"))) if r), None)
+        if result:
+            params[key] = {k: result[k] for k in LEGACY_PARAMS if k in result}
+    return {
+        "server_command": meta.get("API Server Command", ""),
+        "environment": {k: meta[k] for k in LEGACY_ENV if k in meta},
+        "commands": commands,
+        "params": params,
+    }
 
 
 def collect_runs(roots: list[Path]) -> list[dict[str, Any]]:
@@ -207,9 +254,10 @@ def write_data(runs: list[dict[str, Any]], site: Path) -> None:
     index = []
     for run in runs:
         points = run["points"]
-        meta = {k: v for k, v in run.items() if k != "points"}
+        meta = {k: v for k, v in run.items() if k not in ("points", "details")}
         index.append(meta | {"num_points": len(points), "failed": sum(map(_failed, points)), "shapes": _shapes(points)})
-        (data / "runs" / f"{run['id']}.json").write_text(json.dumps(_columns(points), separators=(",", ":")))
+        body = _columns(points) | {"details": run["details"]}
+        (data / "runs" / f"{run['id']}.json").write_text(json.dumps(body, separators=(",", ":")))
     generated = datetime.now(timezone.utc).isoformat(timespec="seconds")
     (data / "index.json").write_text(json.dumps({"generated": generated, "runs": index}, separators=(",", ":")))
 

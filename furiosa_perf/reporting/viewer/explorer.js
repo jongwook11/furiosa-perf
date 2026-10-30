@@ -351,9 +351,10 @@ PAGES.explorer = async function (st) {
   const seriesList = all.map((o) => '<label class="series"><input type="checkbox" data-toggle="' + esc(o.r.id) + '"' + (o.on ? ' checked' : '') + '>'
     + '<svg width="28" height="10" aria-hidden="true"><line x1="0" y1="5" x2="28" y2="5" stroke="' + o.color + '" stroke-width="2" stroke-dasharray="' + o.dash + '"/></svg><span>' + esc(o.label) + '</span></label>').join('');
   const axisOptions = (keys) => keys.map((k) => ({ v: k, label: AXES[k].label() }));
-  const legend = '<div class="legend chart-legend">' + visible.map((o) => '<span><svg width="22" height="10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" stroke="' + o.color
+  // Each legend entry opens how that run was measured (run.js).
+  const legend = '<div class="legend chart-legend">' + visible.map((o) => '<a class="run-link" title="How this run was measured" href="#run?id=' + encodeURIComponent(o.r.id) + '&scen=' + encodeURIComponent(scen) + '"><svg width="22" height="10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" stroke="' + o.color
     + '" stroke-width="3" stroke-linecap="round" stroke-dasharray="' + o.dash + '"/></svg><b>' + esc(hwName(o.r.hw) + ' ×' + o.r.n + (o.r.layout ? ' ' + o.r.layout : ''))
-    + '</b><span class="mono">' + esc(backendLabel(o.r.backend) + ' ' + o.r.ver) + '</span></span>').join('') + '</div>';
+    + '</b><span class="mono">' + esc(backendLabel(o.r.backend) + ' ' + o.r.ver) + '</span><span class="faint">↗</span></a>').join('') + '</div>';
   const caption = model + ', ' + isl + '/' + osl + ' ISL/OSL. ' + visible.map((o) => o.label).join(', ') + '.'
     + (yKey === 'tps_kw' ? ' Per-device throughput scaled to 8-card server power: RNGD 3.0 kW, RTX PRO 6000 6.5 kW, H100/H200 10.2 kW.' : '')
     + (yKey === 'custom' ? ' y = ' + formula + '.' : '') + vsMissing

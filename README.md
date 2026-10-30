@@ -339,7 +339,7 @@ python -m http.server -d site 8080      # or any static web server, e.g. an S3 b
 site/index.html  style.css  *.js     the viewer
 site/theme/                          the look of the site (--theme)
 site/data/index.json                 every run: what it measured, on what, how many points
-site/data/runs/<run id>.json         the points of one run, fetched when a page needs them
+site/data/runs/<run id>.json         the points of one run and how it was run, fetched when a page needs them
 ```
 
 The viewer only fetches the runs a page shows, so the site stays fast as results accumulate. To add results, rerun with `--data-only`: only `data/` is rewritten. A run measured again keeps both results; the pages use the newest.
@@ -351,6 +351,7 @@ The viewer only fetches the runs a page shows, so the site stays fast as results
 | Releases | RNGD across furiosa-llm releases: one-value metrics per model with the change from the previous release, the others at every batch of the model picked from the tiles |
 | Variants | Scenario runs repeated with `--server-arg`, next to the run as configured: capacity within the SLO and point values at a load every run measured |
 | Data | Every run with its point counts, server flags and variant; each run's points as JSON, the filtered list as CSV, and per model one CSV of every point of its runs |
+| Run details | How one run was measured, opened from the Explorer's legend or the Data page: the server command, the client command of every batch (shared options once, then each batch's own) with what the client recorded, and the environment |
 
 Users per rack = whole 8-card servers a rack's power holds (RNGD 3.0 kW, RTX PRO 6000 6.5 kW, H100/H200 10.2 kW assumed; 15 kW rack by default) × users per server at the SLO.
 

@@ -3,7 +3,7 @@
 
 // ---- data ----------------------------------------------------------------------------------------
 // data/index.json lists every run; data/runs/<id>.json holds one run's points (loaded on demand).
-const DATA = { index: null, points: {} };
+const DATA = { index: null, points: {}, details: {} };  // details: how each run was measured (run.js)
 
 async function loadIndex() {
   if (!DATA.index) {
@@ -33,6 +33,7 @@ async function loadPoints(runs) {
     if (!r.ok) throw new Error(run.id + ': HTTP ' + r.status);
     const d = await r.json();
     DATA.points[run.id] = d.rows.map((row) => toPoint(Object.fromEntries(d.cols.map((c, i) => [c, row[i]]))));
+    DATA.details[run.id] = d.details || {};
   }));
 }
 
